@@ -29,7 +29,7 @@ from openai import OpenAI
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
 MODEL = "claude-sonnet-4-6"
 MAX_RETRIES = 3
-MAX_TOKENS = 1024  # 每批10条最坏情况约200 token，留余量
+MAX_TOKENS = 2048  # 每批20条最坏情况约400 token，留余量
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
@@ -181,7 +181,7 @@ def main():
     print(f"共 {len(posts)} 条")
 
     if args.test:
-        batch = posts[:args.batch]
+        batch = posts[:20]
         print(f"【测试模式】只处理前 {len(batch)} 条…")
         result = call_api(client, system_prompt, batch, 0)
         print()
