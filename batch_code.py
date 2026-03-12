@@ -11,6 +11,7 @@
     --batch     10      每次请求的条数（默认 10，减小可提高稳定性）
     --workers   5       并发数
     --show-prompt       打印 system prompt 和示例 user 消息后退出
+    --test              只跑第一批（10条），打印每条原文+编码结果后退出
 
 API Key 放在 config.json 的 api_key 字段中。
 """
@@ -143,6 +144,7 @@ def main():
     parser.add_argument("--batch",        type=int, default=10)
     parser.add_argument("--workers",      type=int, default=5)
     parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
+    parser.add_argument("--test",         action="store_true", help="只跑一批，打印结果后退出")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.output).with_suffix(".checkpoint.json")
@@ -177,6 +179,21 @@ def main():
     print("读取微博数据…")
     posts = load_posts(args.input)
     print(f"共 {len(posts)} 条")
+
+    if args.test:
+        batch = posts[:args.batch]
+        print(f"【测试模式】只处理前 {len(batch)} 条…")
+        result = call_api(client, system_prompt, batch, 0)
+        print()
+        for i, (p, nums) in enumerate(zip(batch, result), 1):
+            user = p.get("user", {}).get("screen_name", "") if isinstance(p.get("user"), dict) else str(p.get("user", ""))
+            text = (p.get("text") or p.get("content") or "")[:80].replace("\n", " ")
+            names = ", ".join(f"{n} {code_name_map.get(n, '')}" for n in nums) or "（无匹配编码）"
+            print(f"[{i:02d}] {user} / {p.get('movie', '')}")
+            print(f"      正文: {text}")
+            print(f"      编码: {names}")
+            print()
+        return
 
     # 断点续跑
     if checkpoint_path.exists():
