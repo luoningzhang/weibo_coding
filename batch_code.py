@@ -8,8 +8,9 @@
     --input     data/no_verified_classified_with_movie.json
     --output    data/coded_output.json
     --codebook  data/codebook.xlsx
-    --batch     20      每次请求的条数
+    --batch     10      每次请求的条数（默认 10，减小可提高稳定性）
     --workers   5       并发数
+    --show-prompt       打印 system prompt 和示例 user 消息后退出
 
 API Key 放在 config.json 的 api_key 字段中。
 """
@@ -27,6 +28,7 @@ from openai import OpenAI
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
 MODEL = "claude-sonnet-4-6"
 MAX_RETRIES = 3
+MAX_TOKENS = 1024  # 每批10条最坏情况约200 token，留余量
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
@@ -114,7 +116,7 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
                     {"role": "user", "content": user_msg},
                 ],
                 temperature=0,
-                max_tokens=512,
+                max_tokens=MAX_TOKENS,
             )
             raw = resp.choices[0].message.content.strip()
             start, end = raw.find("["), raw.rfind("]")
@@ -138,8 +140,9 @@ def main():
     parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json")
     parser.add_argument("--output",   default="data/coded_output.json")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
-    parser.add_argument("--batch",    type=int, default=20)
-    parser.add_argument("--workers",  type=int, default=5)
+    parser.add_argument("--batch",        type=int, default=10)
+    parser.add_argument("--workers",      type=int, default=5)
+    parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.output).with_suffix(".checkpoint.json")
@@ -151,6 +154,25 @@ def main():
     codes = load_codebook(args.codebook)
     system_prompt = build_system_prompt(codes)
     code_name_map = {c["num"]: c["name"] for c in codes}
+
+    if args.show_prompt:
+        print("=" * 60)
+        print("【SYSTEM PROMPT】")
+        print(system_prompt)
+        print("=" * 60)
+        print("【USER 消息示例（第一批前3条）】")
+        posts_preview = load_posts(args.input)[:3]
+        sample = [
+            {
+                "id": i + 1,
+                "user": p.get("user", {}).get("screen_name", "") if isinstance(p.get("user"), dict) else str(p.get("user", "")),
+                "movie": p.get("movie", ""),
+                "text": (p.get("text") or p.get("content") or "")[:500],
+            }
+            for i, p in enumerate(posts_preview)
+        ]
+        print(json.dumps(sample, ensure_ascii=False, indent=2))
+        return
 
     print("读取微博数据…")
     posts = load_posts(args.input)
