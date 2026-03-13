@@ -29,7 +29,8 @@ from openai import OpenAI
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
 MODEL = "claude-sonnet-4-6-thinking"
 MAX_RETRIES = 3
-MAX_TOKENS = 16000  # thinking 模型要求至少 16000；thinking budget 8000，输出余量 8000
+MAX_TOKENS = 5500   # thinking budget 4000 + 输出最多约1500（10-15条JSON编号）
+THINKING_BUDGET = 4000  # 分类任务不需要深度推理，4000 thinking token 足够
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
@@ -135,7 +136,7 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
                     {"role": "user", "content": user_msg},
                 ],
                 max_tokens=MAX_TOKENS,
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": 8000}},
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}},
             )
             raw = resp.choices[0].message.content.strip()
             start, end = raw.find("["), raw.rfind("]")
@@ -159,7 +160,7 @@ def main():
     parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json")
     parser.add_argument("--output",   default="data/coded_output.json")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
-    parser.add_argument("--batch",        type=int, default=10)
+    parser.add_argument("--batch",        type=int, default=15)
     parser.add_argument("--workers",      type=int, default=5)
     parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
     parser.add_argument("--test",         action="store_true", help="跑前200条并与 top200-coding.xlsx 对比后退出")
