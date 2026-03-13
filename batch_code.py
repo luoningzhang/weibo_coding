@@ -8,7 +8,7 @@
     --input     data/no_verified_classified_with_movie.json
     --output    data/coded_output.json
     --codebook  data/codebook.xlsx
-    --batch     10      每次请求的条数（默认 10，减小可提高稳定性）
+    --batch     20      每次请求的条数（默认 20）
     --workers   5       并发数
     --show-prompt       打印 system prompt 和示例 user 消息后退出
     --test              跑前200条，与 top200-coding.xlsx 对比，打印每条差异及汇总统计后退出
@@ -29,7 +29,7 @@ from openai import OpenAI
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
 MODEL = "claude-sonnet-4-6-thinking"
 MAX_RETRIES = 3
-MAX_TOKENS = 5000   # thinking budget 4000 + 输出最多约1000（10条JSON编号）
+MAX_TOKENS = 6000   # thinking budget 4000 + 输出最多约2000（20条JSON编号）
 THINKING_BUDGET = 4000  # 分类任务不需要深度推理，4000 thinking token 足够
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -99,10 +99,10 @@ def build_system_prompt(codes: list[dict]) -> str:
         "- 没有明确行为特征时，宁可少编码，不要猜测。",
         "",
         "## 输出格式",
-        "输入是一个 JSON 数组，每项含 id/user/movie/text 字段。",
-        "输出必须是一个 JSON 数组，顺序与输入一一对应，",
-        "每项是该微博适用的编码编号数组（没有适用编码则为空数组[]）。",
-        "例：输入3条 → 输出 [[5,12],[22],[]]",
+        "输入是一个 JSON 数组，每项含 id/user/movie/text 字段，其中 id 是序号（1开始）。",
+        "输出必须是一个 JSON 对象，key 是 id（字符串），value 是该微博适用的编码编号数组。",
+        "没有适用编码则为空数组[]。必须为每一条都输出对应的 key。",
+        '例：输入3条(id=1,2,3) → 输出 {"1":[5,12],"2":[22],"3":[]}',
     ]
     return "\n".join(lines)
 
@@ -146,12 +146,23 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
                 extra_body={"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}},
             )
             raw = resp.choices[0].message.content.strip()
-            start, end = raw.find("["), raw.rfind("]")
+            # 提取最外层 JSON 对象
+            start, end = raw.find("{"), raw.rfind("}")
             if start == -1 or end == -1:
-                raise ValueError(f"响应不含 JSON 数组: {raw[:200]}")
-            result = json.loads(raw[start:end + 1])
-            if len(result) != len(batch):
-                raise ValueError(f"返回条数 {len(result)} ≠ 批次条数 {len(batch)}")
+                raise ValueError(f"响应不含 JSON 对象: {raw[:200]}")
+            result_dict = json.loads(raw[start:end + 1])
+            # 按顺序组装，缺失的条目填空数组
+            result = []
+            missing = []
+            for i in range(len(batch)):
+                key = str(i + 1)
+                if key in result_dict:
+                    result.append(result_dict[key])
+                else:
+                    result.append([])
+                    missing.append(key)
+            if missing:
+                print(f"  [批次{batch_index}] 警告：缺失 id={','.join(missing)}，已填空", flush=True)
             return result
         except Exception as e:
             wait = 2 ** attempt
@@ -167,7 +178,7 @@ def main():
     parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json")
     parser.add_argument("--output",   default="data/coded_output.json")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
-    parser.add_argument("--batch",        type=int, default=10)
+    parser.add_argument("--batch",        type=int, default=20)
     parser.add_argument("--workers",      type=int, default=5)
     parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
     parser.add_argument("--test",         action="store_true", help="跑前200条并与 top200-coding.xlsx 对比后退出")
