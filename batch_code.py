@@ -29,7 +29,7 @@ from openai import OpenAI
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
 MODEL = "claude-sonnet-4-6-thinking"
 MAX_RETRIES = 3
-MAX_TOKENS = 6000   # thinking budget 4000 + 输出最多约2000（20条JSON编号）
+MAX_TOKENS = 5000   # thinking budget 4000 + 输出最多约1000（10条JSON编号）
 THINKING_BUDGET = 4000  # 分类任务不需要深度推理，4000 thinking token 足够
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -90,6 +90,13 @@ def build_system_prompt(codes: list[dict]) -> str:
         if c["note"]:
             lines.append(f"备注：{c['note']}")
     lines += [
+        "",
+        "## 常见易错提示",
+        "- 编码8（长评）：正文必须包含超过100字的系统性分析，短评/感叹/只有几句话不算。",
+        "- 编码11（安利@好友）：必须有明确的推荐动作（安利、推荐、快去看等）；只是提到朋友或@某人讨论不算。",
+        "- 编码20（鸣不平）vs 编码22（分析竞争对手）：20是为电影受委屈发声，情绪性较强；22是引用数据或客观分析市场/竞品，两者可同时适用。",
+        "- 编码5（同人创作）vs 编码7（搞笑梗）：5是原创内容再创作（画作/剪辑/同人文）；7是幽默改编/谐音梗/表情包，不需要大量创作。",
+        "- 没有明确行为特征时，宁可少编码，不要猜测。",
         "",
         "## 输出格式",
         "输入是一个 JSON 数组，每项含 id/user/movie/text 字段。",
@@ -160,7 +167,7 @@ def main():
     parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json")
     parser.add_argument("--output",   default="data/coded_output.json")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
-    parser.add_argument("--batch",        type=int, default=20)
+    parser.add_argument("--batch",        type=int, default=10)
     parser.add_argument("--workers",      type=int, default=5)
     parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
     parser.add_argument("--test",         action="store_true", help="跑前200条并与 top200-coding.xlsx 对比后退出")
