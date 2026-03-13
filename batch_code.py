@@ -11,7 +11,7 @@
     --batch     10      每次请求的条数（默认 10，减小可提高稳定性）
     --workers   5       并发数
     --show-prompt       打印 system prompt 和示例 user 消息后退出
-    --test              只跑第一批（10条），打印每条原文+编码结果后退出
+    --test              跑前200条，与 top200-coding.xlsx 对比，打印每条差异及汇总统计后退出
 
 API Key 放在 config.json 的 api_key 字段中。
 """
@@ -49,10 +49,30 @@ def load_codebook(path: str) -> list[dict]:
         codes.append({
             "num": int(num),
             "name": str(name).strip(),
+            "definition": str(definition).strip() if definition else "",
             "criteria": str(criteria).strip() if criteria else "",
             "note": str(note).strip() if note else "",
         })
     return codes
+
+
+def load_top200_coding(path: str) -> dict[str, list[int]]:
+    """读取 top200-coding.xlsx，返回 {微博ID: [编码编号...]}"""
+    import re
+    wb = load_workbook(path)
+    ws = wb.active
+    result = {}
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        weibo_id = str(row[1]).strip() if row[1] is not None else None
+        coding_str = row[12]  # 适用编码列
+        if not weibo_id:
+            continue
+        if coding_str:
+            nums = [int(n) for n in re.findall(r'\b(\d+)\b', str(coding_str))]
+        else:
+            nums = []
+        result[weibo_id] = nums
+    return result
 
 
 def build_system_prompt(codes: list[dict]) -> str:
@@ -60,11 +80,14 @@ def build_system_prompt(codes: list[dict]) -> str:
         "你是一位内容分析员，负责对微博文本按行为类别编码。",
         "每条微博可对应 0 到多个编码。只返回 JSON，不要任何解释。",
         "",
-        "## 编码列表（编号 名称 | 识别关键词/特征）",
+        "## 编码列表",
     ]
     for c in codes:
-        note_part = f"（注：{c['note']}）" if c["note"] else ""
-        lines.append(f"{c['num']} {c['name']} | {c['criteria']}{note_part}")
+        lines.append(f"\n### {c['num']} {c['name']}")
+        lines.append(f"操作定义：{c['definition']}")
+        lines.append(f"识别标准：{c['criteria']}")
+        if c["note"]:
+            lines.append(f"备注：{c['note']}")
     lines += [
         "",
         "## 输出格式",
@@ -139,7 +162,8 @@ def main():
     parser.add_argument("--batch",        type=int, default=10)
     parser.add_argument("--workers",      type=int, default=5)
     parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
-    parser.add_argument("--test",         action="store_true", help="只跑一批，打印结果后退出")
+    parser.add_argument("--test",         action="store_true", help="跑前200条并与 top200-coding.xlsx 对比后退出")
+    parser.add_argument("--top200",       default="data/top200-coding.xlsx", help="人工编码参考文件")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.output).with_suffix(".checkpoint.json")
@@ -176,18 +200,65 @@ def main():
     print(f"共 {len(posts)} 条")
 
     if args.test:
-        batch = posts[:20]
-        print(f"【测试模式】只处理前 {len(batch)} 条…")
-        result = call_api(client, system_prompt, batch, 0)
+        test_posts = posts[:200]
+        print(f"【测试模式】处理前 {len(test_posts)} 条，批大小={args.batch}，并发={args.workers}…")
+
+        # 并发跑批次
+        test_results: dict[str, list[int]] = {}
+
+        def process_batch(idx_batch):
+            idx, b = idx_batch
+            return b, call_api(client, system_prompt, b, idx)
+
+        batches = [test_posts[i:i + args.batch] for i in range(0, len(test_posts), args.batch)]
+        with ThreadPoolExecutor(max_workers=args.workers) as executor:
+            futures = {executor.submit(process_batch, (i, b)): i for i, b in enumerate(batches)}
+            done = 0
+            for future in as_completed(futures):
+                b, res = future.result()
+                for p, nums in zip(b, res):
+                    test_results[post_id(p)] = [int(n) for n in nums if isinstance(n, (int, float))]
+                done += len(b)
+                print(f"  进度：{done}/{len(test_posts)}", end="\r", flush=True)
         print()
-        for i, (p, nums) in enumerate(zip(batch, result), 1):
-            user = p.get("user", {}).get("screen_name", "") if isinstance(p.get("user"), dict) else str(p.get("user", ""))
-            text = (p.get("text") or p.get("content") or "")[:80].replace("\n", " ")
-            names = ", ".join(f"{n} {code_name_map.get(n, '')}" for n in nums) or "（无匹配编码）"
-            print(f"[{i:02d}] {user} / {p.get('movie', '')}")
-            print(f"      正文: {text}")
-            print(f"      编码: {names}")
-            print()
+
+        # 与 top200-coding.xlsx 对比
+        ref = load_top200_coding(args.top200)
+        hit = miss = extra = no_ref = 0
+        print("\n" + "=" * 70)
+        print(f"{'排名/ID':<20} {'人工编码':<28} {'模型编码':<28} 差异")
+        print("=" * 70)
+        for rank, p in enumerate(test_posts, 1):
+            pid = post_id(p)
+            model_set = set(test_results.get(pid, []))
+            if pid not in ref:
+                no_ref += 1
+                continue
+            ref_set = set(ref[pid])
+            only_ref = ref_set - model_set   # 漏编
+            only_model = model_set - ref_set  # 多编
+            hit += len(ref_set & model_set)
+            miss += len(only_ref)
+            extra += len(only_model)
+
+            if only_ref or only_model:
+                ref_str = ", ".join(str(n) for n in sorted(ref_set)) or "无"
+                model_str = ", ".join(str(n) for n in sorted(model_set)) or "无"
+                diff_parts = []
+                if only_ref:
+                    diff_parts.append(f"漏:{','.join(str(n) for n in sorted(only_ref))}")
+                if only_model:
+                    diff_parts.append(f"多:{','.join(str(n) for n in sorted(only_model))}")
+                print(f"[{rank:03d}]{pid:<16} {ref_str:<28} {model_str:<28} {' | '.join(diff_parts)}")
+
+        total_ref = hit + miss
+        print("=" * 70)
+        print(f"\n【汇总】参考编码实例总数：{total_ref}，其中：")
+        print(f"  命中（有）：{hit}  ({hit/total_ref*100:.1f}%)" if total_ref else "  命中：0")
+        print(f"  漏编（没有）：{miss}  ({miss/total_ref*100:.1f}%)" if total_ref else "  漏编：0")
+        print(f"  多编（错误）：{extra}")
+        if no_ref:
+            print(f"  无参考（top200中未找到）：{no_ref} 条")
         return
 
     # 断点续跑
