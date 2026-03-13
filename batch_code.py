@@ -29,7 +29,7 @@ from openai import OpenAI
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
 MODEL = "claude-sonnet-4-6-thinking"
 MAX_RETRIES = 3
-MAX_TOKENS = 5500   # thinking budget 4000 + 输出最多约1500（10-15条JSON编号）
+MAX_TOKENS = 6000   # thinking budget 4000 + 输出最多约2000（20条JSON编号）
 THINKING_BUDGET = 4000  # 分类任务不需要深度推理，4000 thinking token 足够
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
@@ -160,7 +160,7 @@ def main():
     parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json")
     parser.add_argument("--output",   default="data/coded_output.json")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
-    parser.add_argument("--batch",        type=int, default=15)
+    parser.add_argument("--batch",        type=int, default=20)
     parser.add_argument("--workers",      type=int, default=5)
     parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
     parser.add_argument("--test",         action="store_true", help="跑前200条并与 top200-coding.xlsx 对比后退出")
