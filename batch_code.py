@@ -19,6 +19,7 @@ API Key 放在 config.json 的 api_key 字段中。
 import argparse
 import json
 import os
+import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -162,6 +163,7 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
         for i, p in enumerate(batch)
     ]
     user_msg = json.dumps(payload, ensure_ascii=False)
+    user_msg += f"\n<!-- run_id:{random.randint(10000,99999)} -->"  # 绕过代理缓存
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
