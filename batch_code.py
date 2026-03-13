@@ -63,13 +63,8 @@ def build_system_prompt(codes: list[dict]) -> str:
         "## 编码列表（编号 名称 | 识别关键词/特征）",
     ]
     for c in codes:
-        criteria_short = c["criteria"]
-        if "关键词：" in criteria_short:
-            criteria_short = criteria_short.split("关键词：")[1].split("；")[0]
-        elif "行为特征：" in criteria_short:
-            criteria_short = criteria_short.split("行为特征：")[1].split("；")[0]
-        note_part = f"（注：{c['note'][:40]}）" if c["note"] else ""
-        lines.append(f"{c['num']} {c['name']} | {criteria_short}{note_part}")
+        note_part = f"（注：{c['note']}）" if c["note"] else ""
+        lines.append(f"{c['num']} {c['name']} | {c['criteria']}{note_part}")
     lines += [
         "",
         "## 输出格式",
