@@ -27,9 +27,9 @@ from openpyxl import load_workbook
 from openai import OpenAI
 
 YUNWU_BASE_URL = "https://yunwu.ai/v1"
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-sonnet-4-6-thinking"
 MAX_RETRIES = 3
-MAX_TOKENS = 2048  # 每批20条最坏情况约400 token，留余量
+MAX_TOKENS = 16000  # thinking 模型要求至少 16000；thinking budget 8000，输出余量 8000
 CONFIG_PATH = Path(__file__).parent / "config.json"
 
 
@@ -134,8 +134,8 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
                 ],
-                temperature=0,
                 max_tokens=MAX_TOKENS,
+                extra_body={"thinking": {"type": "enabled", "budget_tokens": 8000}},
             )
             raw = resp.choices[0].message.content.strip()
             start, end = raw.find("["), raw.rfind("]")
