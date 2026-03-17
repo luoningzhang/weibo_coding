@@ -1,5 +1,6 @@
 """
-按电影、上映阶段分析编码分布与互动量。
+按电影、上映阶段分析所有编码的分布与互动量。
+输出三张 CSV + 控制台摘要。
 
 上映日期（院线首映）：
   流浪地球2   2023-01-22
@@ -8,20 +9,22 @@
   长安三万里  2023-07-08
   孤注一掷    2023-08-08
 
-时间分段：
+时间分段（HOT_DAYS 可调）：
   上映前   created_at < 首映日
-  上映期   首映日 ≤ created_at ≤ 首映日 + 30天
-  长尾期   created_at > 首映日 + 30天
+  上映期   首映日 ≤ created_at ≤ 首映日 + HOT_DAYS天
+  长尾期   created_at > 首映日 + HOT_DAYS天
 
 用法：
     python analyze_by_movie_time.py
-    python analyze_by_movie_time.py --input data/coded_output.json --codebook data/codebook.xlsx
+    python analyze_by_movie_time.py --input data/coded_output.json --out-dir data
 """
 
 import argparse
+import csv
 import json
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from openpyxl import load_workbook
 
@@ -32,7 +35,8 @@ RELEASE_DATES = {
     "长安三万里_电影": datetime(2023, 7, 8),
     "孤注一掷_电影":  datetime(2023, 8, 8),
 }
-HOT_DAYS = 30  # 上映期窗口
+HOT_DAYS = 30
+PHASES = ["上映前", "上映期", "长尾期"]
 
 
 def load_code_names(codebook_path: str) -> dict[int, str]:
@@ -62,124 +66,159 @@ def get_phase(dt: datetime, release: datetime) -> str:
         return "长尾期"
 
 
-def engagement(post: dict) -> int:
+def eng(post: dict) -> int:
     return (int(post.get("reposts_count") or 0)
             + int(post.get("comments_count") or 0)
             + int(post.get("attitudes_count") or 0))
 
 
-def print_table(title: str, rows: list, col_header: str):
-    """rows: [(label, posts, eng, code_dist_dict)]"""
-    print(f"\n{'='*70}")
-    print(f"  {title}")
-    print(f"{'='*70}")
-    print(f"  {'类别':<18} {'帖数':>7} {'互动总量':>12}  编码 Top5（频次）")
-    print(f"  {'─'*65}")
-    for label, posts, eng, code_dist in rows:
-        top5 = sorted(code_dist.items(), key=lambda x: -x[1])[:5]
-        top5_str = "  ".join(f"{c}×{n}" for c, n in top5)
-        print(f"  {label:<18} {posts:>7,} {eng:>12,}  {top5_str}")
+def sep(char="─", width=72):
+    print(char * width)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input",    default="data/coded_output.json")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
+    parser.add_argument("--out-dir",  default="data")
     args = parser.parse_args()
 
     with open(args.input, encoding="utf-8") as f:
         data = json.load(f)
 
     code_names = load_code_names(args.codebook)
+    all_codes  = sorted(code_names)
+    out_dir    = Path(args.out_dir)
 
-    # ── 1. 五部电影汇总 ───────────────────────────────────────────
-    movie_posts   = defaultdict(int)
-    movie_eng     = defaultdict(int)
-    movie_codes   = defaultdict(lambda: defaultdict(int))
-
-    # ── 2. 电影 × 阶段 ────────────────────────────────────────────
-    phase_posts   = defaultdict(lambda: defaultdict(int))     # [movie][phase]
-    phase_eng     = defaultdict(lambda: defaultdict(int))
-    phase_codes   = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-
-    # ── 3. 全库各编码 × 阶段 ─────────────────────────────────────
-    code_phase_posts = defaultdict(lambda: defaultdict(int))  # [code][phase]
-    code_phase_eng   = defaultdict(lambda: defaultdict(int))
-
-    PHASES = ["上映前", "上映期", "长尾期"]
+    # ── 累加器 ────────────────────────────────────────────────────
+    # [movie][code] -> {posts, reposts, comments, attitudes}
+    movie_code = defaultdict(lambda: defaultdict(lambda: [0, 0, 0, 0]))
+    # [movie][phase][code] -> {posts, reposts, comments, attitudes}
+    mp_code    = defaultdict(lambda: defaultdict(lambda: defaultdict(lambda: [0, 0, 0, 0])))
+    # [movie][phase] -> {total_posts, total_eng}
+    mp_totals  = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    # 全库合计
+    total_posts_all = 0
+    total_eng_all   = 0
 
     for post in data:
         movie   = post.get("movie", "")
         dt      = parse_dt(post.get("created_at", ""))
-        eng     = engagement(post)
-        codes   = [int(c) for c in post.get("codes", [])]
+        r       = int(post.get("reposts_count") or 0)
+        c       = int(post.get("comments_count") or 0)
+        a       = int(post.get("attitudes_count") or 0)
+        e       = r + c + a
+        codes   = [int(x) for x in post.get("codes", [])]
         release = RELEASE_DATES.get(movie)
+        total_posts_all += 1
+        total_eng_all   += e
 
-        # 电影维度
-        movie_posts[movie] += 1
-        movie_eng[movie]   += eng
-        for c in codes:
-            movie_codes[movie][c] += 1
+        for code in codes:
+            movie_code[movie][code][0] += 1
+            movie_code[movie][code][1] += r
+            movie_code[movie][code][2] += c
+            movie_code[movie][code][3] += a
 
-        # 阶段维度
         if dt and release:
             phase = get_phase(dt, release)
-            phase_posts[movie][phase] += 1
-            phase_eng[movie][phase]   += eng
-            for c in codes:
-                phase_codes[movie][phase][c] += 1
-                code_phase_posts[c][phase]   += 1
-                code_phase_eng[c][phase]     += eng
+            mp_totals[movie][phase][0] += 1
+            mp_totals[movie][phase][1] += e
+            for code in codes:
+                mp_code[movie][phase][code][0] += 1
+                mp_code[movie][phase][code][1] += r
+                mp_code[movie][phase][code][2] += c
+                mp_code[movie][phase][code][3] += a
 
     # ══════════════════════════════════════════════════════════════
-    #  输出 1：五部电影汇总
+    #  CSV 1：电影 × 编码（全编码）
     # ══════════════════════════════════════════════════════════════
-    print("\n" + "="*70)
-    print("  【一】五部电影总览")
-    print("="*70)
-    print(f"  {'电影':<18} {'帖数':>7} {'互动总量':>12}  编码 Top5（频次）")
-    print(f"  {'─'*65}")
+    csv1 = out_dir / "by_movie_code.csv"
+    with open(csv1, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["电影", "编码", "编码名", "帖数", "转发", "评论", "点赞", "互动总量"])
+        for movie in sorted(RELEASE_DATES):
+            for code in all_codes:
+                v = movie_code[movie][code]
+                w.writerow([movie, code, code_names.get(code, ""),
+                             v[0], v[1], v[2], v[3], v[1]+v[2]+v[3]])
+
+    # ══════════════════════════════════════════════════════════════
+    #  CSV 2：电影 × 阶段 × 编码（全编码）
+    # ══════════════════════════════════════════════════════════════
+    csv2 = out_dir / "by_movie_phase_code.csv"
+    with open(csv2, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["电影", "阶段", "编码", "编码名", "帖数", "转发", "评论", "点赞", "互动总量"])
+        for movie in sorted(RELEASE_DATES):
+            for phase in PHASES:
+                for code in all_codes:
+                    v = mp_code[movie][phase][code]
+                    w.writerow([movie, phase, code, code_names.get(code, ""),
+                                 v[0], v[1], v[2], v[3], v[1]+v[2]+v[3]])
+
+    # ══════════════════════════════════════════════════════════════
+    #  CSV 3：电影 × 阶段 帖数/互动汇总
+    # ══════════════════════════════════════════════════════════════
+    csv3 = out_dir / "by_movie_phase_totals.csv"
+    with open(csv3, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f)
+        w.writerow(["电影", "首映日", "阶段", "帖数", "互动总量"])
+        for movie in sorted(RELEASE_DATES):
+            rel = RELEASE_DATES[movie].strftime("%Y-%m-%d")
+            for phase in PHASES:
+                v = mp_totals[movie][phase]
+                w.writerow([movie, rel, phase, v[0], v[1]])
+
+    print(f"已输出 CSV：\n  {csv1}\n  {csv2}\n  {csv3}")
+
+    # ══════════════════════════════════════════════════════════════
+    #  控制台：【一】五部电影 × 全编码
+    # ══════════════════════════════════════════════════════════════
+    print("\n" + "="*72)
+    print("【一】五部电影 × 全编码（帖数 / 互动总量）")
     for movie in sorted(RELEASE_DATES):
-        n   = movie_posts[movie]
-        eng = movie_eng[movie]
-        top5 = sorted(movie_codes[movie].items(), key=lambda x: -x[1])[:5]
-        top5_str = "  ".join(f"{code_names.get(c,c)}×{cnt}" for c, cnt in top5)
-        print(f"  {movie:<18} {n:>7,} {eng:>12,}  {top5_str}")
+        total_n = sum(movie_code[movie][c][0] for c in all_codes)
+        total_e = sum(movie_code[movie][c][1]+movie_code[movie][c][2]+movie_code[movie][c][3]
+                      for c in all_codes)
+        sep()
+        print(f"  {movie}  |  帖子总数：{movie_posts_n(data, movie):,}  |  编码实例：{total_n:,}  |  互动总量：{total_e:,}")
+        sep("·")
+        print(f"  {'编码':<5} {'名称':<18} {'帖数':>7} {'互动总量':>12}")
+        sep("·")
+        for code in all_codes:
+            v = movie_code[movie][code]
+            n, e = v[0], v[1]+v[2]+v[3]
+            if n == 0:
+                continue
+            print(f"  {code:<5} {code_names.get(code,''):<18} {n:>7,} {e:>12,}")
 
     # ══════════════════════════════════════════════════════════════
-    #  输出 2：每部电影的三阶段分布
+    #  控制台：【二】每部电影三阶段 × 全编码
     # ══════════════════════════════════════════════════════════════
-    print("\n\n" + "="*70)
-    print("  【二】每部电影 × 上映阶段（帖数 / 互动 / 编码 Top3）")
+    print("\n" + "="*72)
+    print("【二】每部电影 × 上映阶段 × 全编码")
     for movie in sorted(RELEASE_DATES):
-        release = RELEASE_DATES[movie]
-        print(f"\n  ── {movie}  首映：{release.strftime('%Y-%m-%d')} ──")
-        print(f"  {'阶段':<10} {'帖数':>7} {'互动总量':>12}  编码 Top3（频次）")
-        print(f"  {'─'*55}")
+        rel = RELEASE_DATES[movie].strftime("%Y-%m-%d")
+        print(f"\n  ════ {movie}  首映：{rel} ════")
         for phase in PHASES:
-            n   = phase_posts[movie][phase]
-            eng = phase_eng[movie][phase]
-            top3 = sorted(phase_codes[movie][phase].items(), key=lambda x: -x[1])[:3]
-            top3_str = "  ".join(f"{code_names.get(c,c)}×{cnt}" for c, cnt in top3)
-            print(f"  {phase:<10} {n:>7,} {eng:>12,}  {top3_str}")
+            pt, pe = mp_totals[movie][phase]
+            print(f"\n  ── {phase}  帖数：{pt:,}  互动：{pe:,} ──")
+            print(f"  {'编码':<5} {'名称':<18} {'帖数':>7} {'互动总量':>12}")
+            sep("·")
+            any_row = False
+            for code in all_codes:
+                v = mp_code[movie][phase][code]
+                n, e = v[0], v[1]+v[2]+v[3]
+                if n == 0:
+                    continue
+                print(f"  {code:<5} {code_names.get(code,''):<18} {n:>7,} {e:>12,}")
+                any_row = True
+            if not any_row:
+                print("  （无数据）")
 
-    # ══════════════════════════════════════════════════════════════
-    #  输出 3：各编码在三阶段的分布（帖数）
-    # ══════════════════════════════════════════════════════════════
-    print("\n\n" + "="*70)
-    print("  【三】各编码 × 上映阶段分布（帖数 / 互动）")
-    print("="*70)
-    print(f"  {'编码':<5} {'名称':<18} " +
-          "".join(f"  {p}帖数  {p}互动" for p in PHASES))
-    print(f"  {'─'*85}")
-    for code in sorted(code_names):
-        name = code_names[code]
-        row = f"  {code:<5} {name:<18}"
-        for phase in PHASES:
-            n   = code_phase_posts[code][phase]
-            eng = code_phase_eng[code][phase]
-            row += f"  {n:>6,}  {eng:>10,}"
-        print(row)
+
+def movie_posts_n(data, movie):
+    return sum(1 for p in data if p.get("movie") == movie)
 
 
 if __name__ == "__main__":
