@@ -37,6 +37,8 @@ RELEASE_DATES = {
 }
 HOT_DAYS = 30
 PHASES = ["上映前", "上映期", "长尾期"]
+FILTER_PATTERN = "今年我最爱的#微博年度电影#是"
+
 
 
 def load_code_names(codebook_path: str) -> dict[int, str]:
@@ -101,7 +103,11 @@ def main():
     total_posts_all = 0
     total_eng_all   = 0
 
-    for post in data:
+    filtered = [p for p in data if FILTER_PATTERN not in (p.get("text") or "")]
+    n_dropped = len(data) - len(filtered)
+    print(f'过滤含"{FILTER_PATTERN}"的帖子：{n_dropped} 条，剩余 {len(filtered)} 条\n')
+
+    for post in filtered:
         movie   = post.get("movie", "")
         dt      = parse_dt(post.get("created_at", ""))
         r       = int(post.get("reposts_count") or 0)
@@ -181,7 +187,7 @@ def main():
         total_e = sum(movie_code[movie][c][1]+movie_code[movie][c][2]+movie_code[movie][c][3]
                       for c in all_codes)
         sep()
-        print(f"  {movie}  |  帖子总数：{movie_posts_n(data, movie):,}  |  编码实例：{total_n:,}  |  互动总量：{total_e:,}")
+        print(f"  {movie}  |  帖子总数：{movie_posts_n(filtered, movie):,}  |  编码实例：{total_n:,}  |  互动总量：{total_e:,}")
         sep("·")
         print(f"  {'编码':<5} {'名称':<18} {'帖数':>7} {'互动总量':>12}")
         sep("·")

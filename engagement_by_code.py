@@ -31,8 +31,11 @@ def main():
     parser.add_argument("--codebook", default="data/codebook.xlsx")
     args = parser.parse_args()
 
+    FILTER = "今年我最爱的#微博年度电影#是"
     with open(args.input, encoding="utf-8") as f:
-        data = json.load(f)
+        raw = json.load(f)
+    data = [p for p in raw if FILTER not in (p.get("text") or "")]
+    print(f"过滤后剩余 {len(data)} 条（去除 {len(raw)-len(data)} 条年度评选帖）\n")
 
     code_names = load_code_names(args.codebook)
 
