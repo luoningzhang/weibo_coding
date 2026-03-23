@@ -109,9 +109,8 @@ def parse_llm_config(config: dict) -> dict:
     return {
         "api_key":        llm.get("api_key") or config.get("api_key", ""),
         "api_base":       llm.get("api_base") or llm.get("base_url") or "https://yunwu.ai/v1",
-        "model":          llm.get("model", "claude-sonnet-4-6-thinking"),
+        "model":          llm.get("model", "gpt-5.4-mini"),
         "delay":          float(llm.get("delay", 0)),
-        "thinking":       "thinking" in llm.get("model", "claude-sonnet-4-6-thinking"),
     }
 
 
@@ -256,7 +255,7 @@ def call_api(client: OpenAI, system_prompt: str,
              batch: list[dict], batch_index: int,
              llm_cfg: dict | None = None) -> list[list[int]]:
     if llm_cfg is None:
-        llm_cfg = {"model": "claude-sonnet-4-6-thinking", "thinking": True, "delay": 0}
+        llm_cfg = {"model": "gpt-5.4-mini", "delay": 0}
     payload = [
         {
             "id": i + 1,
@@ -282,10 +281,6 @@ def call_api(client: OpenAI, system_prompt: str,
         ],
         max_tokens = MAX_TOKENS,
     )
-    if llm_cfg["thinking"]:
-        kwargs["extra_body"] = {"thinking": {"type": "enabled",
-                                             "budget_tokens": THINKING_BUDGET}}
-
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             resp = client.chat.completions.create(**kwargs)
