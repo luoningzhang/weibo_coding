@@ -45,14 +45,31 @@ class QuotaExhaustedError(Exception):
 
 
 # ── 进度条 ────────────────────────────────────────────────────────
+_progress_bar: "ProgressBar | None" = None  # 全局引用，供 log() 使用
+
+
+def log(msg: str):
+    """打印一行信息，不破坏进度条位置。"""
+    if _progress_bar is not None:
+        with _progress_bar._lock:
+            sys.stderr.write(f"\r{' ' * 90}\r")   # 清掉当前进度条行
+            sys.stderr.write(msg + "\n")
+            sys.stderr.flush()
+            _progress_bar._render()                # 立刻补回进度条
+    else:
+        print(msg, flush=True)
+
+
 class ProgressBar:
     BAR_WIDTH = 40
 
     def __init__(self, total: int):
+        global _progress_bar
         self.total   = total
         self.done    = 0
         self._lock   = threading.Lock()
         self._start  = time.time()
+        _progress_bar = self
 
     def update(self, n: int = 1):
         with self._lock:
@@ -72,10 +89,12 @@ class ProgressBar:
         sys.stderr.flush()
 
     def finish(self):
+        global _progress_bar
         with self._lock:
             self._render()
         sys.stderr.write("\n")
         sys.stderr.flush()
+        _progress_bar = None
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────
@@ -245,8 +264,7 @@ def call_api(client: OpenAI, system_prompt: str,
                     result.append([])
                     missing.append(key)
             if missing:
-                print(f"\n  [批次{batch_index}] 警告：缺失 id={','.join(missing)}，已填空",
-                      flush=True)
+                log(f"  [批次{batch_index}] 警告：缺失 id={','.join(missing)}，已填空")
             return result
 
         except Exception as e:
@@ -254,8 +272,7 @@ def call_api(client: OpenAI, system_prompt: str,
 
             # ① 内容过滤：直接跳过，不重试
             if is_content_filter(err_str):
-                print(f"\n⚠️  [内容过滤] 批次{batch_index} 触发内容过滤，填充空编码跳过",
-                      flush=True)
+                log(f"⚠️  [内容过滤] 批次{batch_index} 触发内容过滤，填充空编码跳过")
                 return [[] for _ in batch]
 
             # ② Token/余额耗尽：向上抛出，让主流程停止
@@ -264,13 +281,12 @@ def call_api(client: OpenAI, system_prompt: str,
 
             # ③ 其他错误：正常重试
             wait = 2 ** attempt
-            print(f"\n  [批次{batch_index}] 第{attempt}/{MAX_RETRIES}次失败: {err_str[:120]}",
-                  flush=True)
+            log(f"  [批次{batch_index}] 第{attempt}/{MAX_RETRIES}次失败: {err_str[:120]}")
             if attempt < MAX_RETRIES:
-                print(f"  等待 {wait}s 后重试…", flush=True)
+                log(f"  等待 {wait}s 后重试…")
                 time.sleep(wait)
             else:
-                print(f"  [批次{batch_index}] 放弃，填充空编码", flush=True)
+                log(f"  [批次{batch_index}] 放弃，填充空编码")
                 return [[] for _ in batch]
 
 
@@ -320,8 +336,8 @@ def process_file(client, system_prompt, code_name_map,
                 try:
                     b, res = future.result()
                 except QuotaExhaustedError as qe:
-                    print(f"\n\n🚨 [Token耗尽] {qe}", flush=True)
-                    print("   已保存当前进度，请充值后续跑。", flush=True)
+                    log(f"🚨 [Token耗尽] {qe}")
+                    log("   已保存当前进度，请充值后续跑。")
                     # 取消所有未完成 future
                     for f in futures:
                         f.cancel()
@@ -338,7 +354,7 @@ def process_file(client, system_prompt, code_name_map,
                     json.dump(code_results, f, ensure_ascii=False)
 
     except KeyboardInterrupt:
-        print("\n\n⚠️  手动中断，已保存进度。", flush=True)
+        log("⚠️  手动中断，已保存进度。")
         quota_hit = True  # 跳过最终输出写入
 
     progress.finish()
