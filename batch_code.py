@@ -324,8 +324,12 @@ def process_file(client, system_prompt, code_name_map,
     # 断点续跑
     if checkpoint_path.exists():
         with open(checkpoint_path, encoding="utf-8") as f:
-            code_results: dict[str, list[int]] = json.load(f)
-        log(f"  断点续跑：已完成 {len(code_results)} 条")
+            raw_checkpoint: dict[str, list[int]] = json.load(f)
+        # 过滤掉空结果（上次解析失败整批填充的 []），让它们重新编码
+        code_results = {k: v for k, v in raw_checkpoint.items() if v}
+        skipped_empty = len(raw_checkpoint) - len(code_results)
+        log(f"  断点续跑：有效结果 {len(code_results)} 条"
+            + (f"，跳过上次空编码 {skipped_empty} 条（将重试）" if skipped_empty else ""))
     else:
         code_results = {}
 
