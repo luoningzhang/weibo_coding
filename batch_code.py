@@ -464,41 +464,58 @@ def main():
 
     # ── 原有单文件模式 ────────────────────────────────────────────
     if args.test:
-        posts      = load_posts(args.input)
-        test_posts = posts[:200]
-        print(f"【测试模式】处理前 {len(test_posts)} 条，批大小={args.batch}，并发={args.workers}…")
+        # 按 xlsx 里的 ID 精确取帖子，而非前 200 条
+        ref = load_top200_coding(args.top200)
+        posts_by_id = {post_id(p): p for p in load_posts(args.input)}
+        test_posts  = [posts_by_id[pid] for pid in ref if pid in posts_by_id]
+        missing     = [pid for pid in ref if pid not in posts_by_id]
+        if missing:
+            print(f"⚠️  xlsx 中 {len(missing)} 条在输入文件里找不到，跳过：{missing[:5]}…")
+        print(f"【测试模式】处理 {len(test_posts)} 条，批大小={args.batch}，并发={args.workers}…")
 
-        test_results: dict[str, list[int]] = {}
+        # 断点续跑
+        ckpt_path = Path(args.top200).with_suffix(".test_checkpoint.json")
+        if ckpt_path.exists():
+            with open(ckpt_path, encoding="utf-8") as f:
+                raw_ckpt: dict[str, list[int]] = json.load(f)
+            test_results = {k: v for k, v in raw_ckpt.items() if v}
+            skipped = len(raw_ckpt) - len(test_results)
+            print(f"  断点续跑：有效结果 {len(test_results)} 条"
+                  + (f"，跳过上次空编码 {skipped} 条（将重试）" if skipped else ""))
+        else:
+            test_results = {}
+
+        todo_posts = [p for p in test_posts if post_id(p) not in test_results]
 
         def process_batch(idx_batch):
             idx, b = idx_batch
             return b, call_api(client, system_prompt, b, idx)
 
-        batches  = [test_posts[i:i + args.batch] for i in range(0, len(test_posts), args.batch)]
-        progress = ProgressBar(len(test_posts))
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(process_batch, (i, b)): i
-                       for i, b in enumerate(batches)}
-            for future in as_completed(futures):
-                b, res = future.result()
-                for p, nums in zip(b, res):
-                    test_results[post_id(p)] = [int(n) for n in nums
-                                                if isinstance(n, (int, float))]
-                progress.update(len(b))
-        progress.finish()
+        if todo_posts:
+            batches  = [todo_posts[i:i + args.batch] for i in range(0, len(todo_posts), args.batch)]
+            progress = ProgressBar(len(todo_posts))
+            with ThreadPoolExecutor(max_workers=args.workers) as executor:
+                futures = {executor.submit(process_batch, (i, b)): i
+                           for i, b in enumerate(batches)}
+                for future in as_completed(futures):
+                    b, res = future.result()
+                    for p, nums in zip(b, res):
+                        test_results[post_id(p)] = [int(n) for n in nums
+                                                    if isinstance(n, (int, float))]
+                    with open(ckpt_path, "w", encoding="utf-8") as f:
+                        json.dump(test_results, f, ensure_ascii=False)
+                    progress.update(len(b))
+            progress.finish()
+        else:
+            print("  全部已完成（来自断点）。")
 
-        ref = load_top200_coding(args.top200)
-        hit = miss = extra = no_ref = 0
+        hit = miss = extra = 0
         print("\n" + "=" * 70)
         print(f"{'排名/ID':<20} {'人工编码':<28} {'模型编码':<28} 差异")
         print("=" * 70)
-        for rank, p in enumerate(test_posts, 1):
-            pid       = post_id(p)
-            model_set = set(test_results.get(pid, []))
-            if pid not in ref:
-                no_ref += 1
-                continue
-            ref_set    = set(ref[pid])
+        for rank, (pid, ref_codes) in enumerate(ref.items(), 1):
+            model_set  = set(test_results.get(pid, []))
+            ref_set    = set(ref_codes)
             only_ref   = ref_set - model_set
             only_model = model_set - ref_set
             hit   += len(ref_set & model_set)
@@ -520,8 +537,6 @@ def main():
         print(f"  命中：{hit}  ({hit/total_ref*100:.1f}%)" if total_ref else "  命中：0")
         print(f"  漏编：{miss}  ({miss/total_ref*100:.1f}%)" if total_ref else "  漏编：0")
         print(f"  多编：{extra}")
-        if no_ref:
-            print(f"  无参考：{no_ref} 条")
         return
 
     # 单文件正常跑
