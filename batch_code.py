@@ -223,6 +223,25 @@ def is_content_filter(err_str: str) -> bool:
     return "1301" in err_str or "contentfilter" in err_str.lower()
 
 
+def _extract_result_json(raw: str, batch_index: int) -> dict:
+    """从模型原始响应中提取编码结果 dict，跳过 thinking 内容里的 {...}。"""
+    decoder = json.JSONDecoder()
+    pos = 0
+    while pos < len(raw):
+        start = raw.find("{", pos)
+        if start == -1:
+            break
+        try:
+            obj, _ = decoder.raw_decode(raw, start)
+            # 有效结果：dict 且所有 key 都是纯数字字符串
+            if isinstance(obj, dict) and obj and all(k.isdigit() for k in obj):
+                return obj
+        except json.JSONDecodeError:
+            pass
+        pos = start + 1
+    raise ValueError(f"[批次{batch_index}] 响应中未找到编码结果 JSON: {raw[:300]}")
+
+
 def call_api(client: OpenAI, system_prompt: str,
              batch: list[dict], batch_index: int) -> list[list[int]]:
     payload = [
@@ -252,11 +271,7 @@ def call_api(client: OpenAI, system_prompt: str,
                                          "budget_tokens": THINKING_BUDGET}},
             )
             raw   = resp.choices[0].message.content.strip()
-            start = raw.find("{")
-            end   = raw.rfind("}")
-            if start == -1 or end == -1:
-                raise ValueError(f"响应不含 JSON 对象: {raw[:200]}")
-            result_dict = json.loads(raw[start:end + 1])
+            result_dict = _extract_result_json(raw, batch_index)
             result, missing = [], []
             for i in range(len(batch)):
                 key = str(i + 1)
