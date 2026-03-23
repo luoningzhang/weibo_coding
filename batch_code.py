@@ -52,9 +52,9 @@ def log(msg: str):
     """打印一行信息，不破坏进度条位置。"""
     if _progress_bar is not None:
         with _progress_bar._lock:
-            sys.stderr.write(f"\r{' ' * 100}\r")   # 清掉进度条行
-            sys.stderr.write(msg + "\n")            # 打印消息（光标移到新行）
-            _progress_bar._render()                 # 立刻在新行补回进度条
+            # \n 先换行离开进度条行，不擦除它
+            # 下次 update() 的 \r 会在新当前行重绘进度条
+            sys.stderr.write(f"\n{msg}\n")
             sys.stderr.flush()
     else:
         sys.stderr.write(msg + "\n")
