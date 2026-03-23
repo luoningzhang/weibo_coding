@@ -31,8 +31,6 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openai import OpenAI
 
-YUNWU_BASE_URL  = "https://yunwu.ai/v1"
-MODEL           = "claude-sonnet-4-6-thinking"
 MAX_RETRIES     = 3
 MAX_TOKENS      = 6000
 THINKING_BUDGET = 4000
@@ -103,6 +101,18 @@ class ProgressBar:
 def load_config() -> dict:
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return json.load(f)
+
+
+def parse_llm_config(config: dict) -> dict:
+    """从 config 的 llm 块（或顶层旧格式）解析 API 设置。"""
+    llm = config.get("llm", {})
+    return {
+        "api_key":        llm.get("api_key") or config.get("api_key", ""),
+        "api_base":       llm.get("api_base") or llm.get("base_url") or "https://yunwu.ai/v1",
+        "model":          llm.get("model", "claude-sonnet-4-6-thinking"),
+        "delay":          float(llm.get("delay", 0)),
+        "thinking":       "thinking" in llm.get("model", "claude-sonnet-4-6-thinking"),
+    }
 
 
 def load_codebook(path: str) -> list[dict]:
@@ -243,7 +253,10 @@ def _extract_result_json(raw: str, batch_index: int) -> dict:
 
 
 def call_api(client: OpenAI, system_prompt: str,
-             batch: list[dict], batch_index: int) -> list[list[int]]:
+             batch: list[dict], batch_index: int,
+             llm_cfg: dict | None = None) -> list[list[int]]:
+    if llm_cfg is None:
+        llm_cfg = {"model": "claude-sonnet-4-6-thinking", "thinking": True, "delay": 0}
     payload = [
         {
             "id": i + 1,
@@ -258,18 +271,24 @@ def call_api(client: OpenAI, system_prompt: str,
     user_msg  = json.dumps(payload, ensure_ascii=False)
     user_msg += f"\n<!-- run_id:{random.randint(10000,99999)} -->"
 
+    if llm_cfg["delay"] > 0:
+        time.sleep(llm_cfg["delay"])
+
+    kwargs: dict = dict(
+        model    = llm_cfg["model"],
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_msg},
+        ],
+        max_tokens = MAX_TOKENS,
+    )
+    if llm_cfg["thinking"]:
+        kwargs["extra_body"] = {"thinking": {"type": "enabled",
+                                             "budget_tokens": THINKING_BUDGET}}
+
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_msg},
-                ],
-                max_tokens=MAX_TOKENS,
-                extra_body={"thinking": {"type": "enabled",
-                                         "budget_tokens": THINKING_BUDGET}},
-            )
+            resp = client.chat.completions.create(**kwargs)
             raw   = resp.choices[0].message.content.strip()
             result_dict = _extract_result_json(raw, batch_index)
             result, missing = [], []
@@ -310,7 +329,8 @@ def call_api(client: OpenAI, system_prompt: str,
 # ── 核心处理函数（一个电影/文件） ────────────────────────────────
 def process_file(client, system_prompt, code_name_map,
                  input_path: Path, output_path: Path,
-                 batch_size: int, workers: int):
+                 batch_size: int, workers: int,
+                 llm_cfg: dict | None = None):
 
     checkpoint_path = output_path.with_suffix(".checkpoint.json")
 
@@ -347,7 +367,7 @@ def process_file(client, system_prompt, code_name_map,
 
     def process_batch(idx_batch):
         idx, b = idx_batch
-        return b, call_api(client, system_prompt, b, idx)
+        return b, call_api(client, system_prompt, b, idx, llm_cfg)
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -422,7 +442,8 @@ def main():
     args = parser.parse_args()
 
     config        = load_config()
-    client        = OpenAI(api_key=config["api_key"], base_url=YUNWU_BASE_URL)
+    llm_cfg       = parse_llm_config(config)
+    client        = OpenAI(api_key=llm_cfg["api_key"], base_url=llm_cfg["api_base"])
     codes         = load_codebook(args.codebook)
     system_prompt = build_system_prompt(codes, fewshot_path="data/fewshot_examples.md")
     code_name_map = {c["num"]: c["name"] for c in codes}
@@ -459,7 +480,7 @@ def main():
 
             process_file(client, system_prompt, code_name_map,
                          input_path, output_path,
-                         args.batch, args.workers)
+                         args.batch, args.workers, llm_cfg)
         return
 
     # ── 原有单文件模式 ────────────────────────────────────────────
@@ -489,7 +510,7 @@ def main():
 
         def process_batch(idx_batch):
             idx, b = idx_batch
-            return b, call_api(client, system_prompt, b, idx)
+            return b, call_api(client, system_prompt, b, idx, llm_cfg)
 
         if todo_posts:
             batches  = [todo_posts[i:i + args.batch] for i in range(0, len(todo_posts), args.batch)]
@@ -542,7 +563,7 @@ def main():
     # 单文件正常跑
     process_file(client, system_prompt, code_name_map,
                  Path(args.input), Path(args.output),
-                 args.batch, args.workers)
+                 args.batch, args.workers, llm_cfg)
 
 
 if __name__ == "__main__":
