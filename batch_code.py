@@ -1,25 +1,29 @@
 """
 批量编码微博（云雾 API / claude-sonnet-4-6）
 
-用法:
-    python batch_code.py
+用法（原有模式）:
+    python batch_code.py --input data/xxx.json --output data/out.json
+
+用法（按电影批量模式）:
+    python batch_code.py --movies 流浪地球2 封神 长安三万里
+    python batch_code.py --movies all          # 处理 data/tmp/ 下所有 *_电影 文件夹
 
 可选参数:
-    --input     data/no_verified_classified_with_movie.json
-    --output    data/coded_output.json
     --codebook  data/codebook.xlsx
-    --batch     20      每次请求的条数（默认 20）
+    --batch     20      每批条数（默认 20）
     --workers   5       并发数
-    --show-prompt       打印 system prompt 和示例 user 消息后退出
-    --test              跑前200条，与 top200-coding.xlsx 对比，打印每条差异及汇总统计后退出
+    --tmp-dir   data/tmp   电影文件夹根目录
+    --show-prompt       打印 system prompt 后退出
+    --test              跑前200条与 top200-coding.xlsx 对比后退出
 
 API Key 放在 config.json 的 api_key 字段中。
 """
 
 import argparse
 import json
-import os
 import random
+import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -27,14 +31,54 @@ from pathlib import Path
 from openpyxl import load_workbook
 from openai import OpenAI
 
-YUNWU_BASE_URL = "https://yunwu.ai/v1"
-MODEL = "claude-sonnet-4-6-thinking"
-MAX_RETRIES = 3
-MAX_TOKENS = 6000   # thinking budget 4000 + 输出最多约2000（20条JSON编号）
-THINKING_BUDGET = 4000  # 分类任务不需要深度推理，4000 thinking token 足够
-CONFIG_PATH = Path(__file__).parent / "config.json"
+YUNWU_BASE_URL  = "https://yunwu.ai/v1"
+MODEL           = "claude-sonnet-4-6-thinking"
+MAX_RETRIES     = 3
+MAX_TOKENS      = 6000
+THINKING_BUDGET = 4000
+CONFIG_PATH     = Path(__file__).parent / "config.json"
 
 
+# ── 特殊异常：Token 耗尽，需立即停止 ─────────────────────────────
+class QuotaExhaustedError(Exception):
+    pass
+
+
+# ── 进度条 ────────────────────────────────────────────────────────
+class ProgressBar:
+    BAR_WIDTH = 40
+
+    def __init__(self, total: int):
+        self.total   = total
+        self.done    = 0
+        self._lock   = threading.Lock()
+        self._start  = time.time()
+
+    def update(self, n: int = 1):
+        with self._lock:
+            self.done += n
+            self._render()
+
+    def _render(self):
+        pct     = self.done / self.total if self.total else 0
+        filled  = int(self.BAR_WIDTH * pct)
+        bar     = "█" * filled + "░" * (self.BAR_WIDTH - filled)
+        elapsed = time.time() - self._start
+        speed   = self.done / elapsed if elapsed > 0 else 0
+        remain  = (self.total - self.done) / speed if speed > 0 else 0
+        line    = (f"\r[{bar}] {pct*100:.1f}% | {self.done}/{self.total} | "
+                   f"{speed:.1f}条/秒 | 已用{elapsed/60:.1f}分 | 剩余{remain/60:.1f}分  ")
+        sys.stderr.write(line)
+        sys.stderr.flush()
+
+    def finish(self):
+        with self._lock:
+            self._render()
+        sys.stderr.write("\n")
+        sys.stderr.flush()
+
+
+# ── 工具函数 ──────────────────────────────────────────────────────
 def load_config() -> dict:
     with open(CONFIG_PATH, encoding="utf-8") as f:
         return json.load(f)
@@ -49,30 +93,26 @@ def load_codebook(path: str) -> list[dict]:
         if num is None:
             continue
         codes.append({
-            "num": int(num),
-            "name": str(name).strip(),
+            "num":        int(num),
+            "name":       str(name).strip(),
             "definition": str(definition).strip() if definition else "",
-            "criteria": str(criteria).strip() if criteria else "",
-            "note": str(note).strip() if note else "",
+            "criteria":   str(criteria).strip() if criteria else "",
+            "note":       str(note).strip() if note else "",
         })
     return codes
 
 
 def load_top200_coding(path: str) -> dict[str, list[int]]:
-    """读取 top200-coding.xlsx，返回 {微博ID: [编码编号...]}"""
     import re
     wb = load_workbook(path)
     ws = wb.active
     result = {}
     for row in ws.iter_rows(min_row=2, values_only=True):
         weibo_id = str(row[1]).strip() if row[1] is not None else None
-        coding_str = row[12]  # 适用编码列
+        coding_str = row[12]
         if not weibo_id:
             continue
-        if coding_str:
-            nums = [int(n) for n in re.findall(r'\b(\d+)\b', str(coding_str))]
-        else:
-            nums = []
+        nums = [int(n) for n in re.findall(r'\b(\d+)\b', str(coding_str))] if coding_str else []
         result[weibo_id] = nums
     return result
 
@@ -152,18 +192,31 @@ def post_id(post: dict) -> str:
     return str(post.get("id") or post.get("mid") or post.get("idstr", ""))
 
 
-def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index: int) -> list[list[int]]:
+def is_quota_error(err_str: str) -> bool:
+    keywords = ["insufficient_quota", "quota exceeded", "402", "billing",
+                "credit", "out of token", "余额不足", "账户余额"]
+    return any(k in err_str.lower() for k in keywords)
+
+
+def is_content_filter(err_str: str) -> bool:
+    return "1301" in err_str or "contentfilter" in err_str.lower()
+
+
+def call_api(client: OpenAI, system_prompt: str,
+             batch: list[dict], batch_index: int) -> list[list[int]]:
     payload = [
         {
             "id": i + 1,
-            "user": p.get("user", {}).get("screen_name", "") if isinstance(p.get("user"), dict) else str(p.get("user", "")),
+            "user": (p.get("user", {}).get("screen_name", "")
+                     if isinstance(p.get("user"), dict)
+                     else str(p.get("user", ""))),
             "movie": p.get("movie", ""),
             "text": (p.get("text") or p.get("content") or "")[:500],
         }
         for i, p in enumerate(batch)
     ]
-    user_msg = json.dumps(payload, ensure_ascii=False)
-    user_msg += f"\n<!-- run_id:{random.randint(10000,99999)} -->"  # 绕过代理缓存
+    user_msg  = json.dumps(payload, ensure_ascii=False)
+    user_msg += f"\n<!-- run_id:{random.randint(10000,99999)} -->"
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
@@ -171,20 +224,19 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
                 model=MODEL,
                 messages=[
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
+                    {"role": "user",   "content": user_msg},
                 ],
                 max_tokens=MAX_TOKENS,
-                extra_body={"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}},
+                extra_body={"thinking": {"type": "enabled",
+                                         "budget_tokens": THINKING_BUDGET}},
             )
-            raw = resp.choices[0].message.content.strip()
-            # 提取最外层 JSON 对象
-            start, end = raw.find("{"), raw.rfind("}")
+            raw   = resp.choices[0].message.content.strip()
+            start = raw.find("{")
+            end   = raw.rfind("}")
             if start == -1 or end == -1:
                 raise ValueError(f"响应不含 JSON 对象: {raw[:200]}")
             result_dict = json.loads(raw[start:end + 1])
-            # 按顺序组装，缺失的条目填空数组
-            result = []
-            missing = []
+            result, missing = [], []
             for i in range(len(batch)):
                 key = str(i + 1)
                 if key in result_dict:
@@ -193,170 +245,253 @@ def call_api(client: OpenAI, system_prompt: str, batch: list[dict], batch_index:
                     result.append([])
                     missing.append(key)
             if missing:
-                print(f"  [批次{batch_index}] 警告：缺失 id={','.join(missing)}，已填空", flush=True)
+                print(f"\n  [批次{batch_index}] 警告：缺失 id={','.join(missing)}，已填空",
+                      flush=True)
             return result
+
         except Exception as e:
+            err_str = str(e)
+
+            # ① 内容过滤：直接跳过，不重试
+            if is_content_filter(err_str):
+                print(f"\n⚠️  [内容过滤] 批次{batch_index} 触发内容过滤，填充空编码跳过",
+                      flush=True)
+                return [[] for _ in batch]
+
+            # ② Token/余额耗尽：向上抛出，让主流程停止
+            if is_quota_error(err_str):
+                raise QuotaExhaustedError(f"API 余额/Token 耗尽：{err_str}")
+
+            # ③ 其他错误：正常重试
             wait = 2 ** attempt
-            print(f"  [批次{batch_index}] 第{attempt}次失败: {e}，{wait}s 后重试…", flush=True)
-            if attempt == MAX_RETRIES:
+            print(f"\n  [批次{batch_index}] 第{attempt}/{MAX_RETRIES}次失败: {err_str[:120]}",
+                  flush=True)
+            if attempt < MAX_RETRIES:
+                print(f"  等待 {wait}s 后重试…", flush=True)
+                time.sleep(wait)
+            else:
                 print(f"  [批次{batch_index}] 放弃，填充空编码", flush=True)
                 return [[] for _ in batch]
-            time.sleep(wait)
 
 
+# ── 核心处理函数（一个电影/文件） ────────────────────────────────
+def process_file(client, system_prompt, code_name_map,
+                 input_path: Path, output_path: Path,
+                 batch_size: int, workers: int):
+
+    checkpoint_path = output_path.with_suffix(".checkpoint.json")
+
+    print(f"\n{'='*60}")
+    print(f"  输入: {input_path}")
+    print(f"  输出: {output_path}")
+
+    posts = load_posts(str(input_path))
+    print(f"  共 {len(posts)} 条", flush=True)
+
+    # 断点续跑
+    if checkpoint_path.exists():
+        with open(checkpoint_path, encoding="utf-8") as f:
+            code_results: dict[str, list[int]] = json.load(f)
+        print(f"  断点续跑：已完成 {len(code_results)} 条", flush=True)
+    else:
+        code_results = {}
+
+    todo = [p for p in posts if post_id(p) not in code_results]
+    if not todo:
+        print("  全部已完成，跳过。", flush=True)
+        _write_output(posts, code_results, code_name_map, output_path)
+        return
+
+    print(f"  待处理 {len(todo)} 条，批大小={batch_size}，并发={workers}", flush=True)
+
+    batches  = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
+    progress = ProgressBar(len(todo))
+    quota_hit = False
+
+    def process_batch(idx_batch):
+        idx, b = idx_batch
+        return b, call_api(client, system_prompt, b, idx)
+
+    try:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_batch, (i, b)): i
+                       for i, b in enumerate(batches)}
+            for future in as_completed(futures):
+                try:
+                    b, res = future.result()
+                except QuotaExhaustedError as qe:
+                    print(f"\n\n🚨 [Token耗尽] {qe}", flush=True)
+                    print("   已保存当前进度，请充值后续跑。", flush=True)
+                    # 取消所有未完成 future
+                    for f in futures:
+                        f.cancel()
+                    quota_hit = True
+                    break
+
+                for p, nums in zip(b, res):
+                    code_results[post_id(p)] = [int(n) for n in nums
+                                                if isinstance(n, (int, float))]
+                progress.update(len(b))
+
+                # 每批存一次 checkpoint
+                with open(checkpoint_path, "w", encoding="utf-8") as f:
+                    json.dump(code_results, f, ensure_ascii=False)
+
+    except KeyboardInterrupt:
+        print("\n\n⚠️  手动中断，已保存进度。", flush=True)
+        quota_hit = True  # 跳过最终输出写入
+
+    progress.finish()
+
+    if quota_hit:
+        print(f"  进度已保存至 {checkpoint_path}，完成 {len(code_results)}/{len(posts)} 条。",
+              flush=True)
+        return
+
+    _write_output(posts, code_results, code_name_map, output_path)
+    print(f"  ✅ 完成，已写出 → {output_path}", flush=True)
+
+
+def _write_output(posts, code_results, code_name_map, output_path: Path):
+    output = []
+    for p in posts:
+        pid  = post_id(p)
+        nums = code_results.get(pid, [])
+        output.append({
+            **p,
+            "codes":      nums,
+            "code_names": [f"{n} {code_name_map.get(n, '')}" for n in nums],
+        })
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+
+# ── CLI ───────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description="批量编码微博")
-    parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json")
-    parser.add_argument("--output",   default="data/coded_output.json")
+    parser.add_argument("--input",    default="data/no_verified_classified_with_movie.json",
+                        help="原有单文件模式输入")
+    parser.add_argument("--output",   default="data/coded_output.json",
+                        help="原有单文件模式输出")
     parser.add_argument("--codebook", default="data/codebook.xlsx")
-    parser.add_argument("--batch",        type=int, default=20)
-    parser.add_argument("--workers",      type=int, default=5)
-    parser.add_argument("--show-prompt",  action="store_true", help="打印 prompt 后退出")
-    parser.add_argument("--test",         action="store_true", help="跑前200条并与 top200-coding.xlsx 对比后退出")
-    parser.add_argument("--top200",       default="data/top200-coding.xlsx", help="人工编码参考文件")
+    parser.add_argument("--batch",    type=int, default=20)
+    parser.add_argument("--workers",  type=int, default=5)
+    parser.add_argument("--tmp-dir",  default="data/tmp",
+                        help="电影文件夹根目录（--movies 模式用）")
+    parser.add_argument("--movies",   nargs="+",
+                        help='指定电影名称（不含"_电影"后缀），或 all 处理全部')
+    parser.add_argument("--show-prompt", action="store_true")
+    parser.add_argument("--test",        action="store_true")
+    parser.add_argument("--top200",   default="data/top200-coding.xlsx")
     args = parser.parse_args()
 
-    checkpoint_path = Path(args.output).with_suffix(".checkpoint.json")
-
-    config = load_config()
-    client = OpenAI(api_key=config["api_key"], base_url=YUNWU_BASE_URL)
-
-    print("读取 codebook…")
-    codes = load_codebook(args.codebook)
+    config        = load_config()
+    client        = OpenAI(api_key=config["api_key"], base_url=YUNWU_BASE_URL)
+    codes         = load_codebook(args.codebook)
     system_prompt = build_system_prompt(codes, fewshot_path="data/fewshot_examples.md")
     code_name_map = {c["num"]: c["name"] for c in codes}
 
     if args.show_prompt:
-        print("=" * 60)
-        print("【SYSTEM PROMPT】")
         print(system_prompt)
-        print("=" * 60)
-        print("【USER 消息示例（第一批前3条）】")
-        posts_preview = load_posts(args.input)[:3]
-        sample = [
-            {
-                "id": i + 1,
-                "user": p.get("user", {}).get("screen_name", "") if isinstance(p.get("user"), dict) else str(p.get("user", "")),
-                "movie": p.get("movie", ""),
-                "text": (p.get("text") or p.get("content") or "")[:500],
-            }
-            for i, p in enumerate(posts_preview)
-        ]
-        print(json.dumps(sample, ensure_ascii=False, indent=2))
         return
 
-    print("读取微博数据…")
-    posts = load_posts(args.input)
-    print(f"共 {len(posts)} 条")
+    # ── --movies 模式 ─────────────────────────────────────────────
+    if args.movies:
+        tmp_dir = Path(args.tmp_dir)
 
+        if args.movies == ["all"]:
+            folders = sorted(tmp_dir.glob("*_电影"))
+            movie_names = [f.name.removesuffix("_电影") for f in folders
+                           if f.is_dir()]
+        else:
+            movie_names = args.movies
+
+        if not movie_names:
+            print(f"❌ 在 {tmp_dir} 下找不到任何 *_电影 文件夹")
+            return
+
+        print(f"待处理电影：{movie_names}")
+
+        for movie in movie_names:
+            folder     = tmp_dir / f"{movie}_电影"
+            input_path = folder / f"{movie}_电影_classified_F.json"
+            output_path = folder / f"{movie}_电影_coded.json"
+
+            if not input_path.exists():
+                print(f"\n⚠️  找不到文件：{input_path}，跳过。")
+                continue
+
+            process_file(client, system_prompt, code_name_map,
+                         input_path, output_path,
+                         args.batch, args.workers)
+        return
+
+    # ── 原有单文件模式 ────────────────────────────────────────────
     if args.test:
+        posts      = load_posts(args.input)
         test_posts = posts[:200]
         print(f"【测试模式】处理前 {len(test_posts)} 条，批大小={args.batch}，并发={args.workers}…")
 
-        # 并发跑批次
         test_results: dict[str, list[int]] = {}
 
         def process_batch(idx_batch):
             idx, b = idx_batch
             return b, call_api(client, system_prompt, b, idx)
 
-        batches = [test_posts[i:i + args.batch] for i in range(0, len(test_posts), args.batch)]
+        batches  = [test_posts[i:i + args.batch] for i in range(0, len(test_posts), args.batch)]
+        progress = ProgressBar(len(test_posts))
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(process_batch, (i, b)): i for i, b in enumerate(batches)}
-            done = 0
+            futures = {executor.submit(process_batch, (i, b)): i
+                       for i, b in enumerate(batches)}
             for future in as_completed(futures):
                 b, res = future.result()
                 for p, nums in zip(b, res):
-                    test_results[post_id(p)] = [int(n) for n in nums if isinstance(n, (int, float))]
-                done += len(b)
-                print(f"  进度：{done}/{len(test_posts)}", end="\r", flush=True)
-        print()
+                    test_results[post_id(p)] = [int(n) for n in nums
+                                                if isinstance(n, (int, float))]
+                progress.update(len(b))
+        progress.finish()
 
-        # 与 top200-coding.xlsx 对比
         ref = load_top200_coding(args.top200)
         hit = miss = extra = no_ref = 0
         print("\n" + "=" * 70)
         print(f"{'排名/ID':<20} {'人工编码':<28} {'模型编码':<28} 差异")
         print("=" * 70)
         for rank, p in enumerate(test_posts, 1):
-            pid = post_id(p)
+            pid       = post_id(p)
             model_set = set(test_results.get(pid, []))
             if pid not in ref:
                 no_ref += 1
                 continue
-            ref_set = set(ref[pid])
-            only_ref = ref_set - model_set   # 漏编
-            only_model = model_set - ref_set  # 多编
-            hit += len(ref_set & model_set)
-            miss += len(only_ref)
+            ref_set    = set(ref[pid])
+            only_ref   = ref_set - model_set
+            only_model = model_set - ref_set
+            hit   += len(ref_set & model_set)
+            miss  += len(only_ref)
             extra += len(only_model)
-
             if only_ref or only_model:
-                ref_str = ", ".join(str(n) for n in sorted(ref_set)) or "无"
+                ref_str   = ", ".join(str(n) for n in sorted(ref_set)) or "无"
                 model_str = ", ".join(str(n) for n in sorted(model_set)) or "无"
-                diff_parts = []
+                parts     = []
                 if only_ref:
-                    diff_parts.append(f"漏:{','.join(str(n) for n in sorted(only_ref))}")
+                    parts.append(f"漏:{','.join(str(n) for n in sorted(only_ref))}")
                 if only_model:
-                    diff_parts.append(f"多:{','.join(str(n) for n in sorted(only_model))}")
-                print(f"[{rank:03d}]{pid:<16} {ref_str:<28} {model_str:<28} {' | '.join(diff_parts)}")
+                    parts.append(f"多:{','.join(str(n) for n in sorted(only_model))}")
+                print(f"[{rank:03d}]{pid:<16} {ref_str:<28} {model_str:<28} {' | '.join(parts)}")
 
         total_ref = hit + miss
         print("=" * 70)
         print(f"\n【汇总】参考编码实例总数：{total_ref}，其中：")
-        print(f"  命中（有）：{hit}  ({hit/total_ref*100:.1f}%)" if total_ref else "  命中：0")
-        print(f"  漏编（没有）：{miss}  ({miss/total_ref*100:.1f}%)" if total_ref else "  漏编：0")
-        print(f"  多编（错误）：{extra}")
+        print(f"  命中：{hit}  ({hit/total_ref*100:.1f}%)" if total_ref else "  命中：0")
+        print(f"  漏编：{miss}  ({miss/total_ref*100:.1f}%)" if total_ref else "  漏编：0")
+        print(f"  多编：{extra}")
         if no_ref:
-            print(f"  无参考（top200中未找到）：{no_ref} 条")
+            print(f"  无参考：{no_ref} 条")
         return
 
-    # 断点续跑
-    if checkpoint_path.exists():
-        with open(checkpoint_path, encoding="utf-8") as f:
-            code_results: dict[str, list[int]] = json.load(f)
-        print(f"断点续跑：已完成 {len(code_results)} 条")
-    else:
-        code_results = {}
-
-    todo_posts = [p for p in posts if post_id(p) not in code_results]
-    print(f"待处理：{len(todo_posts)} 条，批大小={args.batch}，并发={args.workers}")
-
-    if todo_posts:
-        batches = [todo_posts[i:i + args.batch] for i in range(0, len(todo_posts), args.batch)]
-        completed = 0
-        total = len(todo_posts)
-
-        def process_batch(idx_batch):
-            idx, batch = idx_batch
-            return batch, call_api(client, system_prompt, batch, idx)
-
-        with ThreadPoolExecutor(max_workers=args.workers) as executor:
-            futures = {executor.submit(process_batch, (i, b)): i for i, b in enumerate(batches)}
-            for future in as_completed(futures):
-                batch, result = future.result()
-                for p, nums in zip(batch, result):
-                    code_results[post_id(p)] = [int(n) for n in nums if isinstance(n, (int, float))]
-                completed += len(batch)
-                with open(checkpoint_path, "w", encoding="utf-8") as f:
-                    json.dump(code_results, f, ensure_ascii=False)
-                print(f"进度：{completed}/{total} ({completed/total*100:.1f}%)", end="\r", flush=True)
-        print(f"\n编码完成，共 {len(code_results)} 条")
-
-    # 输出 JSON：在原始数据上附加 codes 字段
-    output = []
-    for p in posts:
-        pid = post_id(p)
-        nums = code_results.get(pid, [])
-        output.append({
-            **p,
-            "codes": nums,
-            "code_names": [f"{n} {code_name_map.get(n, '')}" for n in nums],
-        })
-
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(output, f, ensure_ascii=False, indent=2)
-    print(f"已写出 → {args.output}")
+    # 单文件正常跑
+    process_file(client, system_prompt, code_name_map,
+                 Path(args.input), Path(args.output),
+                 args.batch, args.workers)
 
 
 if __name__ == "__main__":
