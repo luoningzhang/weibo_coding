@@ -52,29 +52,38 @@ def log(msg: str):
     """打印一行信息，不破坏进度条位置。"""
     if _progress_bar is not None:
         with _progress_bar._lock:
-            sys.stderr.write(f"\r{' ' * 90}\r")   # 清掉当前进度条行
+            sys.stderr.write(f"\r{' ' * 100}\r")
             sys.stderr.write(msg + "\n")
             sys.stderr.flush()
-            _progress_bar._render()                # 立刻补回进度条
     else:
-        print(msg, flush=True)
+        sys.stderr.write(msg + "\n")
+        sys.stderr.flush()
 
 
 class ProgressBar:
-    BAR_WIDTH = 40
+    BAR_WIDTH       = 40
+    REFRESH_INTERVAL = 0.3   # 秒，定时刷新间隔
 
     def __init__(self, total: int):
         global _progress_bar
-        self.total   = total
-        self.done    = 0
-        self._lock   = threading.Lock()
-        self._start  = time.time()
+        self.total    = total
+        self.done     = 0
+        self._lock    = threading.Lock()
+        self._start   = time.time()
+        self._stopped = False
         _progress_bar = self
+        self._thread  = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
 
     def update(self, n: int = 1):
         with self._lock:
-            self.done += n
-            self._render()
+            self.done += n          # 只更新计数，不触发渲染
+
+    def _loop(self):
+        while not self._stopped:
+            with self._lock:
+                self._render()
+            time.sleep(self.REFRESH_INTERVAL)
 
     def _render(self):
         pct     = self.done / self.total if self.total else 0
@@ -90,6 +99,8 @@ class ProgressBar:
 
     def finish(self):
         global _progress_bar
+        self._stopped = True
+        self._thread.join()
         with self._lock:
             self._render()
         sys.stderr.write("\n")
@@ -297,28 +308,28 @@ def process_file(client, system_prompt, code_name_map,
 
     checkpoint_path = output_path.with_suffix(".checkpoint.json")
 
-    print(f"\n{'='*60}")
-    print(f"  输入: {input_path}")
-    print(f"  输出: {output_path}")
+    log(f"\n{'='*60}")
+    log(f"  输入: {input_path}")
+    log(f"  输出: {output_path}")
 
     posts = load_posts(str(input_path))
-    print(f"  共 {len(posts)} 条", flush=True)
+    log(f"  共 {len(posts)} 条")
 
     # 断点续跑
     if checkpoint_path.exists():
         with open(checkpoint_path, encoding="utf-8") as f:
             code_results: dict[str, list[int]] = json.load(f)
-        print(f"  断点续跑：已完成 {len(code_results)} 条", flush=True)
+        log(f"  断点续跑：已完成 {len(code_results)} 条")
     else:
         code_results = {}
 
     todo = [p for p in posts if post_id(p) not in code_results]
     if not todo:
-        print("  全部已完成，跳过。", flush=True)
+        log("  全部已完成，跳过。")
         _write_output(posts, code_results, code_name_map, output_path)
         return
 
-    print(f"  待处理 {len(todo)} 条，批大小={batch_size}，并发={workers}", flush=True)
+    log(f"  待处理 {len(todo)} 条，批大小={batch_size}，并发={workers}")
 
     batches  = [todo[i:i + batch_size] for i in range(0, len(todo), batch_size)]
     progress = ProgressBar(len(todo))
@@ -360,12 +371,11 @@ def process_file(client, system_prompt, code_name_map,
     progress.finish()
 
     if quota_hit:
-        print(f"  进度已保存至 {checkpoint_path}，完成 {len(code_results)}/{len(posts)} 条。",
-              flush=True)
+        log(f"  进度已保存至 {checkpoint_path}，完成 {len(code_results)}/{len(posts)} 条。")
         return
 
     _write_output(posts, code_results, code_name_map, output_path)
-    print(f"  ✅ 完成，已写出 → {output_path}", flush=True)
+    log(f"  ✅ 完成，已写出 → {output_path}")
 
 
 def _write_output(posts, code_results, code_name_map, output_path: Path):
@@ -423,10 +433,10 @@ def main():
             movie_names = args.movies
 
         if not movie_names:
-            print(f"❌ 在 {tmp_dir} 下找不到任何 *_电影 文件夹")
+            log(f"❌ 在 {tmp_dir} 下找不到任何 *_电影 文件夹")
             return
 
-        print(f"待处理电影：{movie_names}")
+        log(f"待处理电影：{movie_names}")
 
         for movie in movie_names:
             folder     = tmp_dir / f"{movie}_电影"
@@ -434,7 +444,7 @@ def main():
             output_path = folder / f"{movie}_电影_coded.json"
 
             if not input_path.exists():
-                print(f"\n⚠️  找不到文件：{input_path}，跳过。")
+                log(f"⚠️  找不到文件：{input_path}，跳过。")
                 continue
 
             process_file(client, system_prompt, code_name_map,
