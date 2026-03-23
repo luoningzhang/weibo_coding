@@ -45,15 +45,16 @@ class QuotaExhaustedError(Exception):
 
 
 # ── 进度条 ────────────────────────────────────────────────────────
-_progress_bar: "ProgressBar | None" = None  # 全局引用，供 log() 使用
+_progress_bar: "ProgressBar | None" = None
 
 
 def log(msg: str):
     """打印一行信息，不破坏进度条位置。"""
     if _progress_bar is not None:
         with _progress_bar._lock:
-            sys.stderr.write(f"\r{' ' * 100}\r")
-            sys.stderr.write(msg + "\n")
+            sys.stderr.write(f"\r{' ' * 100}\r")   # 清掉进度条行
+            sys.stderr.write(msg + "\n")            # 打印消息（光标移到新行）
+            _progress_bar._render()                 # 立刻在新行补回进度条
             sys.stderr.flush()
     else:
         sys.stderr.write(msg + "\n")
@@ -61,29 +62,20 @@ def log(msg: str):
 
 
 class ProgressBar:
-    BAR_WIDTH       = 40
-    REFRESH_INTERVAL = 0.3   # 秒，定时刷新间隔
+    BAR_WIDTH = 40
 
     def __init__(self, total: int):
         global _progress_bar
-        self.total    = total
-        self.done     = 0
-        self._lock    = threading.Lock()
-        self._start   = time.time()
-        self._stopped = False
+        self.total  = total
+        self.done   = 0
+        self._lock  = threading.Lock()
+        self._start = time.time()
         _progress_bar = self
-        self._thread  = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
 
     def update(self, n: int = 1):
         with self._lock:
-            self.done += n          # 只更新计数，不触发渲染
-
-    def _loop(self):
-        while not self._stopped:
-            with self._lock:
-                self._render()
-            time.sleep(self.REFRESH_INTERVAL)
+            self.done += n
+            self._render()
 
     def _render(self):
         pct     = self.done / self.total if self.total else 0
@@ -92,15 +84,14 @@ class ProgressBar:
         elapsed = time.time() - self._start
         speed   = self.done / elapsed if elapsed > 0 else 0
         remain  = (self.total - self.done) / speed if speed > 0 else 0
-        line    = (f"\r[{bar}] {pct*100:.1f}% | {self.done}/{self.total} | "
-                   f"{speed:.1f}条/秒 | 已用{elapsed/60:.1f}分 | 剩余{remain/60:.1f}分  ")
-        sys.stderr.write(line)
+        sys.stderr.write(
+            f"\r[{bar}] {pct*100:.1f}% | {self.done}/{self.total} | "
+            f"{speed:.1f}条/秒 | 已用{elapsed/60:.1f}分 | 剩余{remain/60:.1f}分  "
+        )
         sys.stderr.flush()
 
     def finish(self):
         global _progress_bar
-        self._stopped = True
-        self._thread.join()
         with self._lock:
             self._render()
         sys.stderr.write("\n")
