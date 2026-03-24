@@ -57,6 +57,13 @@ def movie_name(path: Path) -> str:
     return stem
 
 
+def get_user_id(post: dict):
+    u = post.get("user")
+    if isinstance(u, dict):
+        return u.get("id") or u.get("user_id")
+    return u or post.get("user_id")
+
+
 def analyze(posts: list[dict]) -> dict:
     total = len(posts)
     no_code = sum(1 for p in posts if not p.get("codes"))
@@ -64,7 +71,9 @@ def analyze(posts: list[dict]) -> dict:
     for p in posts:
         for c in p.get("codes", []):
             code_counter[int(c)] += 1
-    return {"total": total, "no_code": no_code, "counter": code_counter}
+    unique_users = len({get_user_id(p) for p in posts if get_user_id(p) is not None})
+    return {"total": total, "no_code": no_code, "counter": code_counter,
+            "unique_users": unique_users}
 
 
 def print_report(results: list[tuple[str, dict]], code_names: dict[int, str]):
@@ -77,7 +86,8 @@ def print_report(results: list[tuple[str, dict]], code_names: dict[int, str]):
         total    = stats["total"]
         no_code  = stats["no_code"]
         coded    = total - no_code
-        print(f"  总条数：{total}　　已编码：{coded}　　无编码：{no_code}　　"
+        print(f"  总条数：{total}　　不同用户：{stats['unique_users']}　　"
+              f"已编码：{coded}　　无编码：{no_code}　　"
               f"编码覆盖率：{coded/total*100:.1f}%")
         print()
         if stats["counter"]:
@@ -98,7 +108,8 @@ def print_report(results: list[tuple[str, dict]], code_names: dict[int, str]):
     for _, s in results:
         all_counter.update(s["counter"])
 
-    print(f"  【全部电影汇总】总条数：{total_all}　　"
+    unique_users_all = sum(s["unique_users"] for _, s in results)
+    print(f"  【全部电影汇总】总条数：{total_all}　　不同用户：{unique_users_all}　　"
           f"无编码：{no_code_all}　　"
           f"覆盖率：{(total_all-no_code_all)/total_all*100:.1f}%")
     print()
@@ -123,7 +134,7 @@ def export_excel(results: list[tuple[str, dict]], code_names: dict[int, str],
     # 收集所有出现过的编码
     all_codes = sorted({c for _, s in results for c in s["counter"]})
 
-    header = ["电影", "总条数", "已编码", "无编码", "覆盖率%"] + \
+    header = ["电影", "总条数", "不同用户", "已编码", "无编码", "覆盖率%"] + \
              [f"{c} {code_names.get(c,'')}" for c in all_codes]
     ws1.append(header)
 
@@ -139,7 +150,7 @@ def export_excel(results: list[tuple[str, dict]], code_names: dict[int, str],
         total   = stats["total"]
         no_code = stats["no_code"]
         coded   = total - no_code
-        row = [movie, total, coded, no_code,
+        row = [movie, total, stats["unique_users"], coded, no_code,
                round(coded / total * 100, 1) if total else 0]
         for c in all_codes:
             row.append(stats["counter"].get(c, 0))
@@ -153,7 +164,8 @@ def export_excel(results: list[tuple[str, dict]], code_names: dict[int, str],
         no_code_all += s["no_code"]
         all_counter.update(s["counter"])
     coded_all = total_all - no_code_all
-    sum_row = ["【合计】", total_all, coded_all, no_code_all,
+    sum_row = ["【合计】", total_all, sum(s["unique_users"] for _, s in results),
+               coded_all, no_code_all,
                round(coded_all / total_all * 100, 1) if total_all else 0]
     for c in all_codes:
         sum_row.append(all_counter.get(c, 0))
