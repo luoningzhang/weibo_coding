@@ -41,6 +41,8 @@ def main():
                 row["codes"] = ", ".join(str(c) for c in v) if v else ""
             elif k == "code_names":
                 row["code_names"] = ", ".join(str(c) for c in v) if v else ""
+            elif isinstance(v, str):
+                row[k] = v.replace("\n", " ").replace("\r", " ")
             else:
                 row[k] = v
         return row
