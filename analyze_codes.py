@@ -64,16 +64,40 @@ def get_user_id(post: dict):
     return u or post.get("user_id")
 
 
+def engagement(post: dict) -> int:
+    v = post.get("engagement_total")
+    if v is not None:
+        return int(v)
+    return (int(post.get("reposts_count", 0) or 0) +
+            int(post.get("comments_count", 0) or 0) +
+            int(post.get("attitudes_count", 0) or 0))
+
+
 def analyze(posts: list[dict]) -> dict:
     total = len(posts)
     no_code = sum(1 for p in posts if not p.get("codes"))
     code_counter: Counter = Counter()
+    code_reposts:   dict[int, int] = {}
+    code_comments:  dict[int, int] = {}
+    code_attitudes: dict[int, int] = {}
+    code_engagement: dict[int, int] = {}
     for p in posts:
+        rep = int(p.get("reposts_count",   0) or 0)
+        com = int(p.get("comments_count",  0) or 0)
+        att = int(p.get("attitudes_count", 0) or 0)
+        eng = engagement(p)
         for c in p.get("codes", []):
-            code_counter[int(c)] += 1
+            c = int(c)
+            code_counter[c]    += 1
+            code_reposts[c]    = code_reposts.get(c, 0)    + rep
+            code_comments[c]   = code_comments.get(c, 0)   + com
+            code_attitudes[c]  = code_attitudes.get(c, 0)  + att
+            code_engagement[c] = code_engagement.get(c, 0) + eng
     unique_users = len({get_user_id(p) for p in posts if get_user_id(p) is not None})
     return {"total": total, "no_code": no_code, "counter": code_counter,
-            "unique_users": unique_users}
+            "unique_users": unique_users,
+            "reposts": code_reposts, "comments": code_comments,
+            "attitudes": code_attitudes, "engagement": code_engagement}
 
 
 def print_report(results: list[tuple[str, dict]], code_names: dict[int, str]):
@@ -91,12 +115,17 @@ def print_report(results: list[tuple[str, dict]], code_names: dict[int, str]):
               f"编码覆盖率：{coded/total*100:.1f}%")
         print()
         if stats["counter"]:
-            print(f"  {'编码':<6} {'名称':<18} {'出现次数':>8} {'占总条数%':>10}")
-            print(f"  {'-'*46}")
+            print(f"  {'编码':<6} {'名称':<16} {'条数':>6} {'占%':>6} {'转发':>10} {'评论':>10} {'点赞':>10} {'转赞评总':>12} {'均转赞评':>10}")
+            print(f"  {'-'*90}")
             for code, cnt in sorted(stats["counter"].items()):
                 name = code_names.get(code, "")
                 pct  = cnt / total * 100
-                print(f"  {code:<6} {name:<18} {cnt:>8} {pct:>9.1f}%")
+                rep  = stats["reposts"].get(code, 0)
+                com  = stats["comments"].get(code, 0)
+                att  = stats["attitudes"].get(code, 0)
+                eng  = stats["engagement"].get(code, 0)
+                avg  = eng / cnt if cnt else 0
+                print(f"  {code:<6} {name:<16} {cnt:>6} {pct:>5.1f}% {rep:>10,} {com:>10,} {att:>10,} {eng:>12,} {avg:>10,.0f}")
         else:
             print("  （无编码数据）")
 
@@ -113,13 +142,28 @@ def print_report(results: list[tuple[str, dict]], code_names: dict[int, str]):
           f"无编码：{no_code_all}　　"
           f"覆盖率：{(total_all-no_code_all)/total_all*100:.1f}%")
     print()
+    all_reposts:   dict[int, int] = {}
+    all_comments:  dict[int, int] = {}
+    all_attitudes: dict[int, int] = {}
+    all_eng:       dict[int, int] = {}
+    for _, s in results:
+        for c in s["counter"]:
+            all_reposts[c]   = all_reposts.get(c, 0)   + s["reposts"].get(c, 0)
+            all_comments[c]  = all_comments.get(c, 0)  + s["comments"].get(c, 0)
+            all_attitudes[c] = all_attitudes.get(c, 0) + s["attitudes"].get(c, 0)
+            all_eng[c]       = all_eng.get(c, 0)       + s["engagement"].get(c, 0)
     if all_counter:
-        print(f"  {'编码':<6} {'名称':<18} {'出现次数':>8} {'占总条数%':>10}")
-        print(f"  {'-'*46}")
+        print(f"  {'编码':<6} {'名称':<16} {'条数':>6} {'占%':>6} {'转发':>10} {'评论':>10} {'点赞':>10} {'转赞评总':>12} {'均转赞评':>10}")
+        print(f"  {'-'*90}")
         for code, cnt in sorted(all_counter.items()):
             name = code_names.get(code, "")
             pct  = cnt / total_all * 100
-            print(f"  {code:<6} {name:<18} {cnt:>8} {pct:>9.1f}%")
+            rep  = all_reposts.get(code, 0)
+            com  = all_comments.get(code, 0)
+            att  = all_attitudes.get(code, 0)
+            eng  = all_eng.get(code, 0)
+            avg  = eng / cnt if cnt else 0
+            print(f"  {code:<6} {name:<16} {cnt:>6} {pct:>5.1f}% {rep:>10,} {com:>10,} {att:>10,} {eng:>12,} {avg:>10,.0f}")
     print(sep)
 
 
@@ -187,19 +231,21 @@ def export_excel(results: list[tuple[str, dict]], code_names: dict[int, str],
         # 小标题
         ws2.cell(row_idx, 1, f"▶ {movie}（总 {total} 条）").font = Font(bold=True)
         row_idx += 1
-        ws2.cell(row_idx, 1, "编码")
-        ws2.cell(row_idx, 2, "名称")
-        ws2.cell(row_idx, 3, "次数")
-        ws2.cell(row_idx, 4, "占总条数%")
-        for cell in ws2[row_idx]:
-            cell.font = Font(bold=True)
-            cell.fill = PatternFill("solid", fgColor="BDD7EE")
+        for col, hdr in enumerate(["编码", "名称", "次数", "占总条数%",
+                                    "转发总数", "评论总数", "点赞总数", "转赞评总数", "均转赞评"], 1):
+            ws2.cell(row_idx, col, hdr).font = Font(bold=True)
+            ws2.cell(row_idx, col).fill = PatternFill("solid", fgColor="BDD7EE")
         row_idx += 1
         for code, cnt in sorted(stats["counter"].items()):
-            ws2.cell(row_idx, 1, code)
-            ws2.cell(row_idx, 2, code_names.get(code, ""))
-            ws2.cell(row_idx, 3, cnt)
-            ws2.cell(row_idx, 4, round(cnt / total * 100, 1) if total else 0)
+            rep = stats["reposts"].get(code, 0)
+            com = stats["comments"].get(code, 0)
+            att = stats["attitudes"].get(code, 0)
+            eng = stats["engagement"].get(code, 0)
+            for col, val in enumerate([code, code_names.get(code, ""), cnt,
+                                        round(cnt / total * 100, 1) if total else 0,
+                                        rep, com, att, eng,
+                                        round(eng / cnt, 0) if cnt else 0], 1):
+                ws2.cell(row_idx, col, val)
             row_idx += 1
         row_idx += 1  # 空行
 
