@@ -170,6 +170,10 @@ def build_stats(posts: list[dict]):
     phase_cat_posts = [[0] * N_CATS for _ in range(N_PHASES)]
     phase_cat_eng   = [[0] * N_CATS for _ in range(N_PHASES)]
 
+    # per-movie × three-phase × category
+    mv_phase_cat_posts = {m: [[0]*N_CATS for _ in range(N_PHASES)] for m in MOVIE_ORDER_SORTED}
+    mv_phase_cat_eng   = {m: [[0]*N_CATS for _ in range(N_PHASES)] for m in MOVIE_ORDER_SORTED}
+
     # per-movie per-code post counts (for Table 1 code-level detail)
     mv_code_posts = defaultdict(lambda: defaultdict(int))
 
@@ -215,6 +219,9 @@ def build_stats(posts: list[dict]):
                 if phase_i is not None:
                     phase_cat_posts[phase_i][i] += 1
                     phase_cat_eng[phase_i][i]   += eng
+                    if movie in mv_phase_cat_posts:
+                        mv_phase_cat_posts[movie][phase_i][i] += 1
+                        mv_phase_cat_eng[movie][phase_i][i]   += eng
 
         codes_set = set(codes)
         for c in codes_set:
@@ -246,7 +253,9 @@ def build_stats(posts: list[dict]):
         "sips_code_posts":   dict(sips_code_posts),
         "all_code_posts":    dict(all_code_posts),
         "sips_by_movie":     dict(sips_by_movie),
-        "mv_code_posts":     {k: dict(v) for k, v in mv_code_posts.items()},
+        "mv_code_posts":       {k: dict(v) for k, v in mv_code_posts.items()},
+        "mv_phase_cat_posts":  mv_phase_cat_posts,
+        "mv_phase_cat_eng":    mv_phase_cat_eng,
     }
 
 
@@ -477,29 +486,51 @@ def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = N
 #  Figure 1：四阶段共鸣结构折线图
 # ─────────────────────────────────────────────────────────────────
 
-def _setup_chinese_font():
-    """在 matplotlib 中启用中文字体（Windows / Mac / Linux 均适用）。"""
-    import matplotlib.font_manager as fm
-    import matplotlib.pyplot as plt
+# English labels for movies (used in Figure 1)
+MOVIE_EN = {
+    "流浪地球2":  "Wandering Earth 2",
+    "消失的她":   "Lost in the Stars",
+    "封神":       "Creation of the Gods",
+    "长安三万里": "Chang'an",
+    "孤注一掷":   "No More Bets",
+}
+PHASES_EN = ["Pre-Release\n(-30 to -1d)", "Opening Period\n(D1-30)", "Long Tail\n(D31-120)"]
+CAT_EN    = [c[1] for c in CATEGORIES]   # English short names already in CATEGORIES
 
-    candidates = [
-        "Microsoft YaHei", "微软雅黑",
-        "SimHei", "黑体",
-        "STHeiti", "华文黑体",
-        "PingFang SC", "苹方-简",
-        "Noto Sans CJK SC", "Noto Sans SC",
-        "WenQuanYi Micro Hei",
-        "Source Han Sans CN",
-    ]
-    available = {f.name for f in fm.fontManager.ttflist}
-    chosen = next((f for f in candidates if f in available), None)
-    if chosen:
-        plt.rcParams["font.sans-serif"] = [chosen, "DejaVu Sans"]
-        print(f"  图表字体: {chosen}")
-    else:
-        print("⚠️  未找到中文字体，图中文字可能显示为方框。")
-        print("   建议：pip install matplotlib; 或安装 Microsoft YaHei / SimHei 字体。")
-    plt.rcParams["axes.unicode_minus"] = False
+
+def _avg_eng_matrix(phase_posts: list, phase_eng: list):
+    """Return N_PHASES × N_CATS array of avg engagement (nan where no data)."""
+    import numpy as np
+    mat = np.zeros((N_PHASES, N_CATS))
+    for ph in range(N_PHASES):
+        for cat in range(N_CATS):
+            n = phase_posts[ph][cat]
+            e = phase_eng[ph][cat]
+            mat[ph, cat] = e / n if n else float("nan")
+    return mat
+
+
+def _draw_panel(ax, avg_eng, title: str, colors, markers, x):
+    """Draw one phase-line panel onto ax."""
+    import numpy as np
+    import matplotlib.ticker as mticker
+
+    lines = []
+    for i, en in enumerate(CAT_EN):
+        y = avg_eng[:, i]
+        ln, = ax.plot(x, y, color=colors[i], marker=markers[i],
+                      linewidth=1.8, markersize=6, zorder=3)
+        lines.append(ln)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(PHASES_EN, fontsize=7.5)
+    ax.set_ylabel("Avg. Engagement per Post", fontsize=8)
+    ax.set_title(title, fontsize=9, pad=5, fontweight="bold")
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
+    ax.grid(axis="y", linestyle="--", alpha=0.35, zorder=0)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(axis="both", labelsize=7.5)
+    return lines
 
 
 def plot_figure1(stats: dict, fig_path: str):
@@ -507,52 +538,55 @@ def plot_figure1(stats: dict, fig_path: str):
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
-        import matplotlib.ticker as mticker
         import numpy as np
     except ImportError:
-        print("⚠️  matplotlib 未安装，跳过 Figure 1。请运行: pip install matplotlib numpy")
+        print("⚠️  matplotlib not installed. Run: pip install matplotlib numpy")
         return
 
-    _setup_chinese_font()
+    plt.rcParams.update({
+        "font.family":        "DejaVu Sans",
+        "axes.unicode_minus": False,
+    })
 
-    # avg engagement per post: phase × category
-    phase_cat_posts = stats["phase_cat_posts"]
-    phase_cat_eng   = stats["phase_cat_eng"]
-
-    avg_eng = np.zeros((N_PHASES, N_CATS))
-    for ph in range(N_PHASES):
-        for cat in range(N_CATS):
-            n = phase_cat_posts[ph][cat]
-            e = phase_cat_eng[ph][cat]
-            avg_eng[ph, cat] = e / n if n else np.nan
-
-    # Color palette (colorblind-friendly)
     colors  = ["#E63946", "#457B9D", "#2A9D8F", "#E9C46A", "#F4A261", "#9B5DE5"]
     markers = ["o", "s", "^", "D", "v", "P"]
+    x       = np.arange(N_PHASES)
 
-    fig, ax = plt.subplots(figsize=(9, 5.5))
+    # 6 panels: 5 movies + 1 total, arranged 2 rows × 3 columns
+    panel_data = []
+    for movie in MOVIE_ORDER_SORTED:
+        mat   = _avg_eng_matrix(stats["mv_phase_cat_posts"][movie],
+                                stats["mv_phase_cat_eng"][movie])
+        panel_data.append((MOVIE_EN.get(movie, movie), mat))
+    # total (weighted average across all movies)
+    mat_total = _avg_eng_matrix(stats["phase_cat_posts"], stats["phase_cat_eng"])
+    panel_data.append(("All Films (Weighted Avg.)", mat_total))
 
-    x = np.arange(N_PHASES)
-    for i, (zh, en, _) in enumerate(CATEGORIES):
-        y = avg_eng[:, i]
-        label = f"{zh}\n({en})"
-        ax.plot(x, y, color=colors[i], marker=markers[i], linewidth=2,
-                markersize=7, label=label, zorder=3)
+    fig, axes = plt.subplots(2, 3, figsize=(13, 7.5),
+                             gridspec_kw={"hspace": 0.55, "wspace": 0.38})
+    axes_flat = axes.flatten()
 
-    ax.set_xticks(x)
-    ax.set_xticklabels(PHASES, fontsize=11)
-    ax.set_ylabel("每帖均互动数（转+评+赞）", fontsize=11)
-    ax.set_xlabel("上映阶段", fontsize=11)
-    ax.set_title("Figure 1  三阶段共鸣结构变化（全样本加权平均）", fontsize=13, pad=14)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=0)
-    ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(loc="upper right", fontsize=8, framealpha=0.8)
+    legend_lines = None
+    for idx, (title, mat) in enumerate(panel_data):
+        lines = _draw_panel(axes_flat[idx], mat, title, colors, markers, x)
+        if legend_lines is None:
+            legend_lines = lines
 
-    plt.tight_layout()
+    # shared legend below all subplots, outside the plot area
+    fig.legend(
+        legend_lines, CAT_EN,
+        loc="lower center",
+        ncol=3,
+        fontsize=8,
+        framealpha=0.9,
+        bbox_to_anchor=(0.5, -0.08),
+        title="Behavioral Category",
+        title_fontsize=8.5,
+    )
+
     plt.savefig(fig_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"✅ Figure 1 已保存 → {fig_path}")
+    print(f"✅ Figure 1 saved → {fig_path}")
 
 
 # ─────────────────────────────────────────────────────────────────
