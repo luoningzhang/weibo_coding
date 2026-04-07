@@ -478,6 +478,62 @@ def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = N
 
     auto_width(ws4)
 
+    # ══════════════════════════════════════════════════════════════
+    #  Figure 1 底层数据：电影 × 阶段 × 类别（帖数 / 互动 / 均互动）
+    # ══════════════════════════════════════════════════════════════
+    ws5 = wb.create_sheet("Figure1_数据")
+
+    # ── 宽表：列 = 阶段×类别，行 = 电影 ───────────────────────────
+    # 第一行：大标题（阶段）
+    # 第二行：子标题（类别指标）
+    # 后续行：各电影 + 合计
+
+    # 构建列顺序：每个阶段下6个类别，各3个指标（帖数/互动/均互动）
+    # 但这会导致很多列。改用"长表"格式更适合论文分析。
+
+    # ── 长表（tidy format）──────────────────────────────────────
+    ws5.append(["电影 (Movie)", "电影英文", "阶段 (Phase)", "阶段英文",
+                "行为类别 (Category)", "类别英文",
+                "帖数 (Posts)", "互动总量 (Total Eng.)", "每帖均互动 (Avg Eng/Post)"])
+    style_header(ws5, 1)
+    ws5.row_dimensions[1].height = 28
+
+    PHASE_EN_SHORT = ["Pre-Release", "Opening Period (D1-30)", "Long Tail (D31-120)"]
+    MOVIE_EN_MAP   = {**MOVIE_EN, "All Films": "All Films (Weighted Avg.)"}
+
+    # 5 movies
+    for movie in movies:
+        mv_pp = stats["mv_phase_cat_posts"].get(movie, [[0]*N_CATS]*N_PHASES)
+        mv_pe = stats["mv_phase_cat_eng"].get(movie,   [[0]*N_CATS]*N_PHASES)
+        for ph, (ph_zh, ph_en) in enumerate(zip(PHASES, PHASE_EN_SHORT)):
+            for ci, (cat_zh, cat_en, _) in enumerate(CATEGORIES):
+                n   = mv_pp[ph][ci]
+                e   = mv_pe[ph][ci]
+                avg = round(e / n, 2) if n else ""
+                ws5.append([movie, MOVIE_EN.get(movie, movie), ph_zh, ph_en,
+                             f"{ci+1}. {cat_zh}", cat_en, n, e, avg])
+                style_body(ws5, ws5.max_row)
+
+    # total (weighted average across all films)
+    for ph, (ph_zh, ph_en) in enumerate(zip(PHASES, PHASE_EN_SHORT)):
+        for ci, (cat_zh, cat_en, _) in enumerate(CATEGORIES):
+            n   = stats["phase_cat_posts"][ph][ci]
+            e   = stats["phase_cat_eng"][ph][ci]
+            avg = round(e / n, 2) if n else ""
+            ws5.append(["全部电影（合计）", "All Films", ph_zh, ph_en,
+                         f"{ci+1}. {cat_zh}", cat_en, n, e, avg])
+            r = ws5.max_row
+            for cell in ws5[r]:
+                cell.font = SUM_FONT
+                cell.fill = SUM_FILL
+                cell.border = BORDER
+                cell.alignment = CENTER
+
+    auto_width(ws5)
+    # 加宽类别列
+    ws5.column_dimensions["E"].width = 22
+    ws5.column_dimensions["F"].width = 28
+
     wb.save(out_path)
     print(f"✅ Excel 已保存 → {out_path}")
 
