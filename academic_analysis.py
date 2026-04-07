@@ -1,16 +1,17 @@
 """
-学术分析脚本：六大行为类别 × 四阶段参与结构
+学术分析脚本：六大行为类别 × 三阶段参与结构
 
 输出：
-  Table 1 — 六大类行为分布总表（电影内部占比 + 全样本占比）
+  Table 1 — 六大类 × 28编码行为分布总表（电影内部占比 + 全样本占比）
   Table 2 — 行为频次与共鸣效率对比（帖数占比 / 互动占比 / 均互动 / 效率比）
-  Figure 1 — 四阶段共鸣结构变化折线图（PNG）
+  Figure 1 — 三阶段共鸣结构变化折线图（PNG）
   Table 3 — SIPs行为指纹对比（含code17 vs 全样本）
   Table 4 — SIPs跨电影分布
 
 用法：
     python academic_analysis.py
     python academic_analysis.py --dir data/tmp --out academic_results.xlsx --fig figure1.png
+    python academic_analysis.py --codebook data/codebook.xlsx
 """
 
 import argparse
@@ -52,9 +53,10 @@ RELEASE_DATES = {**RELEASE_DATES_RAW,
 MOVIE_ORDER = list(RELEASE_DATES_RAW.keys())  # 展示顺序（按上映时间）
 MOVIE_ORDER_SORTED = sorted(MOVIE_ORDER, key=lambda m: RELEASE_DATES_RAW[m])
 
-# ── 四阶段定义（相对首映日） ──────────────────────────────────────
-PHASES = ["上映前期", "上映初期", "上映中期", "长尾期"]
-PHASE_RANGES = [(-30, -1), (1, 14), (15, 30), (31, 120)]   # [days from release]
+# ── 三阶段定义（相对首映日） ──────────────────────────────────────
+PHASES = ["上映前期", "上映初期", "长尾期"]
+PHASE_RANGES = [(-30, -1), (1, 30), (31, 120)]   # [days from release]
+N_PHASES = len(PHASES)
 
 FILTER_PATTERN = "今年我最爱的#微博年度电影#是"
 
@@ -102,6 +104,26 @@ def normalize_movie(raw: str) -> str:
     return raw.removesuffix("_电影").strip()
 
 
+def load_codebook(path: str) -> dict[int, str]:
+    """编码号 → 名称（取 data/codebook.xlsx 第二列）"""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(path)
+        ws = wb.active
+        mapping = {}
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            cells = list(row) + [None, None]
+            num, name = cells[0], cells[1]
+            if num is not None:
+                try:
+                    mapping[int(num)] = str(name).strip() if name else ""
+                except (ValueError, TypeError):
+                    pass
+        return mapping
+    except Exception:
+        return {}
+
+
 def load_posts(root: Path) -> list[dict]:
     posts = []
     for path in sorted(root.rglob("*_coded.json")):
@@ -142,11 +164,14 @@ def build_stats(posts: list[dict]):
     # mv_cat_posts[movie][cat] -> posts
     mv_cat_posts = defaultdict(lambda: [0] * N_CATS)
 
-    # four-phase × category
+    # three-phase × category
     # phase_cat_posts[phase][cat] -> posts count
     # phase_cat_eng[phase][cat]   -> engagement sum
-    phase_cat_posts = [[0] * N_CATS for _ in range(4)]
-    phase_cat_eng   = [[0] * N_CATS for _ in range(4)]
+    phase_cat_posts = [[0] * N_CATS for _ in range(N_PHASES)]
+    phase_cat_eng   = [[0] * N_CATS for _ in range(N_PHASES)]
+
+    # per-movie per-code post counts (for Table 1 code-level detail)
+    mv_code_posts = defaultdict(lambda: defaultdict(int))
 
     # SIPs accumulators
     sips_posts   = 0
@@ -191,10 +216,12 @@ def build_stats(posts: list[dict]):
                     phase_cat_posts[phase_i][i] += 1
                     phase_cat_eng[phase_i][i]   += eng
 
-        for c in codes:
+        codes_set = set(codes)
+        for c in codes_set:
             all_code_posts[c] += 1
+            mv_code_posts[movie][c] += 1
 
-        is_sip = SIPS_CODE in codes
+        is_sip = SIPS_CODE in codes_set
         if is_sip:
             sips_posts += 1
             sips_by_movie[movie] += 1
@@ -219,6 +246,7 @@ def build_stats(posts: list[dict]):
         "sips_code_posts":   dict(sips_code_posts),
         "all_code_posts":    dict(all_code_posts),
         "sips_by_movie":     dict(sips_by_movie),
+        "mv_code_posts":     {k: dict(v) for k, v in mv_code_posts.items()},
     }
 
 
@@ -230,7 +258,7 @@ def pct(num, denom):
     return round(num / denom * 100, 2) if denom else 0.0
 
 
-def export_excel(stats: dict, out_path: str):
+def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = None):
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
@@ -268,38 +296,88 @@ def export_excel(stats: dict, out_path: str):
 
     T = stats["total_posts"]
     movies = MOVIE_ORDER_SORTED
+    cb = codebook or {}
+
+    # 行样式用到的额外颜色
+    CAT_FILL   = PatternFill("solid", fgColor="C5D9F1")   # 类别小计行
+    CODE_FILL  = PatternFill("solid", fgColor="F2F2F2")   # 一阶编码行（偶数）
+    CODE_FILL2 = PatternFill("solid", fgColor="FFFFFF")   # 一阶编码行（奇数）
+    CAT_FONT   = Font(bold=True, size=10)
+    CODE_FONT  = Font(size=10)
+    LEFT_ALIGN = Alignment(horizontal="left", vertical="center", wrap_text=False)
 
     # ══════════════════════════════════════════════════════════════
-    #  Table 1：六大类行为分布总表
+    #  Table 1：六大类 × 28编码行为分布总表
     # ══════════════════════════════════════════════════════════════
     ws1 = wb.active
     ws1.title = "Table1_行为分布"
 
-    hdr = ["行为类别（二阶编码）", "包含编码"] + \
-          [f"{m}\n（内部占比%）" for m in movies] + ["全样本占比%"]
+    # 表头：两行（合并第一行为大标题 + 第二行列名）
+    hdr = ["行为类别 / 一阶编码", "编码号", "编码名称"] + \
+          [f"{m}\n内部占比%" for m in movies] + ["全样本\n帖数", "全样本\n占比%"]
     ws1.append(hdr)
     style_header(ws1, 1)
     ws1.row_dimensions[1].height = 36
 
-    for i, (zh, en, codes) in enumerate(CATEGORIES):
-        row = [f"{i+1}. {zh}\n{en}", ", ".join(str(c) for c in sorted(codes))]
+    # 冻结首行
+    ws1.freeze_panes = "A2"
+
+    for cat_i, (zh, en, cat_codes_set) in enumerate(CATEGORIES):
+        cat_codes_sorted = sorted(cat_codes_set)
+        code_row_count = 0
+
+        # ── 一阶编码行 ──────────────────────────────────────────
+        for code in cat_codes_sorted:
+            code_name = cb.get(code, "")
+            row = [f"  └ {zh}", str(code), code_name]
+            for movie in movies:
+                mp = stats["movie_posts"].get(movie, 0)
+                n  = stats["mv_code_posts"].get(movie, {}).get(code, 0)
+                row.append(pct(n, mp))
+            global_n = stats["all_code_posts"].get(code, 0)
+            row += [global_n, pct(global_n, T)]
+            ws1.append(row)
+            r = ws1.max_row
+            fill = CODE_FILL if code_row_count % 2 == 0 else CODE_FILL2
+            for cell in ws1[r]:
+                cell.font      = CODE_FONT
+                cell.fill      = fill
+                cell.border    = BORDER
+                cell.alignment = CENTER
+            ws1[r][0].alignment = LEFT_ALIGN   # 类别名左对齐
+            code_row_count += 1
+
+        # ── 类别小计行 ──────────────────────────────────────────
+        row = [f"▶ {cat_i+1}. {zh}（小计）", "—", "—"]
         for movie in movies:
             mp    = stats["movie_posts"].get(movie, 0)
-            n_cat = stats["mv_cat_posts"].get(movie, [0]*N_CATS)[i]
+            n_cat = stats["mv_cat_posts"].get(movie, [0]*N_CATS)[cat_i]
             row.append(pct(n_cat, mp))
-        row.append(pct(stats["cat_posts"][i], T))
+        global_n_cat = stats["cat_posts"][cat_i]
+        row += [global_n_cat, pct(global_n_cat, T)]
         ws1.append(row)
-        style_body(ws1, ws1.max_row)
+        r = ws1.max_row
+        for cell in ws1[r]:
+            cell.font      = CAT_FONT
+            cell.fill      = CAT_FILL
+            cell.border    = BORDER
+            cell.alignment = CENTER
+        ws1[r][0].alignment = LEFT_ALIGN
+        ws1.row_dimensions[r].height = 18
 
-    # 样本行数
-    ws1.append(["样本量（帖子数）", "—"] +
-               [stats["movie_posts"].get(m, 0) for m in movies] + [T])
+    # ── 样本量汇总行 ──────────────────────────────────────────
+    ws1.append(["【样本量（帖子数）】", "", ""] +
+               [stats["movie_posts"].get(m, 0) for m in movies] + [T, 100.0])
     style_body(ws1, ws1.max_row, bold=True)
 
-    ws1.column_dimensions["A"].width = 28
-    ws1.column_dimensions["B"].width = 18
-    for col_i in range(3, 3 + len(movies) + 1):
-        ws1.column_dimensions[get_column_letter(col_i)].width = 16
+    # 列宽
+    ws1.column_dimensions["A"].width = 24
+    ws1.column_dimensions["B"].width = 8
+    ws1.column_dimensions["C"].width = 20
+    for col_i in range(4, 4 + len(movies)):
+        ws1.column_dimensions[get_column_letter(col_i)].width = 14
+    ws1.column_dimensions[get_column_letter(4 + len(movies))].width     = 12
+    ws1.column_dimensions[get_column_letter(4 + len(movies) + 1)].width = 12
 
     # ══════════════════════════════════════════════════════════════
     #  Table 2：行为频次与共鸣效率
@@ -399,6 +477,31 @@ def export_excel(stats: dict, out_path: str):
 #  Figure 1：四阶段共鸣结构折线图
 # ─────────────────────────────────────────────────────────────────
 
+def _setup_chinese_font():
+    """在 matplotlib 中启用中文字体（Windows / Mac / Linux 均适用）。"""
+    import matplotlib.font_manager as fm
+    import matplotlib.pyplot as plt
+
+    candidates = [
+        "Microsoft YaHei", "微软雅黑",
+        "SimHei", "黑体",
+        "STHeiti", "华文黑体",
+        "PingFang SC", "苹方-简",
+        "Noto Sans CJK SC", "Noto Sans SC",
+        "WenQuanYi Micro Hei",
+        "Source Han Sans CN",
+    ]
+    available = {f.name for f in fm.fontManager.ttflist}
+    chosen = next((f for f in candidates if f in available), None)
+    if chosen:
+        plt.rcParams["font.sans-serif"] = [chosen, "DejaVu Sans"]
+        print(f"  图表字体: {chosen}")
+    else:
+        print("⚠️  未找到中文字体，图中文字可能显示为方框。")
+        print("   建议：pip install matplotlib; 或安装 Microsoft YaHei / SimHei 字体。")
+    plt.rcParams["axes.unicode_minus"] = False
+
+
 def plot_figure1(stats: dict, fig_path: str):
     try:
         import matplotlib
@@ -407,15 +510,17 @@ def plot_figure1(stats: dict, fig_path: str):
         import matplotlib.ticker as mticker
         import numpy as np
     except ImportError:
-        print("⚠️  matplotlib 未安装，跳过 Figure 1。请运行: pip install matplotlib")
+        print("⚠️  matplotlib 未安装，跳过 Figure 1。请运行: pip install matplotlib numpy")
         return
+
+    _setup_chinese_font()
 
     # avg engagement per post: phase × category
     phase_cat_posts = stats["phase_cat_posts"]
     phase_cat_eng   = stats["phase_cat_eng"]
 
-    avg_eng = np.zeros((4, N_CATS))
-    for ph in range(4):
+    avg_eng = np.zeros((N_PHASES, N_CATS))
+    for ph in range(N_PHASES):
         for cat in range(N_CATS):
             n = phase_cat_posts[ph][cat]
             e = phase_cat_eng[ph][cat]
@@ -427,21 +532,22 @@ def plot_figure1(stats: dict, fig_path: str):
 
     fig, ax = plt.subplots(figsize=(9, 5.5))
 
-    x = np.arange(4)
+    x = np.arange(N_PHASES)
     for i, (zh, en, _) in enumerate(CATEGORIES):
         y = avg_eng[:, i]
+        label = f"{zh}\n({en})"
         ax.plot(x, y, color=colors[i], marker=markers[i], linewidth=2,
-                markersize=7, label=zh, zorder=3)
+                markersize=7, label=label, zorder=3)
 
     ax.set_xticks(x)
     ax.set_xticklabels(PHASES, fontsize=11)
     ax.set_ylabel("每帖均互动数（转+评+赞）", fontsize=11)
     ax.set_xlabel("上映阶段", fontsize=11)
-    ax.set_title("Figure 1  四阶段共鸣结构变化（全样本加权平均）", fontsize=13, pad=14)
+    ax.set_title("Figure 1  三阶段共鸣结构变化（全样本加权平均）", fontsize=13, pad=14)
     ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
     ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=0)
     ax.spines[["top", "right"]].set_visible(False)
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.8)
+    ax.legend(loc="upper right", fontsize=8, framealpha=0.8)
 
     plt.tight_layout()
     plt.savefig(fig_path, dpi=150, bbox_inches="tight")
@@ -495,13 +601,15 @@ def print_summary(stats: dict):
 # ─────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="学术分析：六大类 × 四阶段")
-    parser.add_argument("--dir", default="data/tmp",
+    parser = argparse.ArgumentParser(description="学术分析：六大类 × 三阶段")
+    parser.add_argument("--dir",      default="data/tmp",
                         help="扫描根目录（递归查找 *_coded.json）")
-    parser.add_argument("--out", default="academic_results.xlsx",
+    parser.add_argument("--out",      default="academic_results.xlsx",
                         help="Excel 输出路径")
-    parser.add_argument("--fig", default="figure1_phases.png",
+    parser.add_argument("--fig",      default="figure1_phases.png",
                         help="Figure 1 PNG 输出路径")
+    parser.add_argument("--codebook", default="data/codebook.xlsx",
+                        help="编码手册路径（用于 Table 1 显示编码名称）")
     args = parser.parse_args()
 
     root = Path(args.dir)
@@ -516,9 +624,15 @@ def main():
         return
     print(f"共加载 {len(posts):,} 条帖子，开始计算...")
 
+    cb = load_codebook(args.codebook)
+    if cb:
+        print(f"编码手册已加载：{len(cb)} 个编码名称")
+    else:
+        print(f"⚠️  未加载编码手册（{args.codebook}），Table1 将只显示编码号")
+
     stats = build_stats(posts)
     print_summary(stats)
-    export_excel(stats, args.out)
+    export_excel(stats, args.out, codebook=cb)
     plot_figure1(stats, args.fig)
 
 
