@@ -618,10 +618,8 @@ def plot_figure1(stats: dict, fig_path: str):
     mat_total = _avg_eng_matrix(stats["phase_cat_posts"], stats["phase_cat_eng"])
     panel_data.append(("All Films (Weighted Avg.)", mat_total))
 
-    # compute global y-max so all 6 panels share the same y-axis scale
-    all_vals = [v for _, mat in panel_data
-                for v in mat.flatten() if not np.isnan(v)]
-    y_max = max(all_vals) * 1.12 if all_vals else 1.0   # 12% headroom
+    # compute per-panel y-max: each panel auto-scales to its own data
+    # (keeps within-movie trends clearly readable)
 
     fig, axes = plt.subplots(2, 3, figsize=(13, 7.5),
                              gridspec_kw={"hspace": 0.55, "wspace": 0.38})
@@ -630,7 +628,7 @@ def plot_figure1(stats: dict, fig_path: str):
     legend_lines = None
     for idx, (title, mat) in enumerate(panel_data):
         lines = _draw_panel(axes_flat[idx], mat, title, colors, markers, x)
-        axes_flat[idx].set_ylim(0, y_max)   # unified y-axis
+        # let each panel's y-axis scale to its own data range
         if legend_lines is None:
             legend_lines = lines
 
