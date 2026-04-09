@@ -87,19 +87,106 @@ def fmt_dt(raw: str) -> str:
         return raw
 
 
-def load_posts(root: Path) -> list[dict]:
-    posts = []
+def _iter_posts_from_file(path: Path):
+    """
+    逐条产生 post dict，尽量少占内存。
+    优先用 ijson 流式解析；若未安装则 json.load 后立即遍历。
+    """
+    movie_from_file = path.stem.removesuffix("_coded").removesuffix("_电影")
+
+    # ── 尝试 ijson 流式解析 ──────────────────────────────────────
+    try:
+        import ijson
+        with open(path, "rb") as f:
+            # 先试顶层数组 (prefix = "item")
+            count = 0
+            for post in ijson.items(f, "item"):
+                if not post.get("movie"):
+                    post["movie"] = movie_from_file
+                yield post
+                count += 1
+            if count > 0:
+                return
+        # 顶层是 {"data":[...]} 等结构
+        for prefix in ("data.item", "posts.item", "items.item"):
+            with open(path, "rb") as f:
+                count = 0
+                try:
+                    for post in ijson.items(f, prefix):
+                        if not post.get("movie"):
+                            post["movie"] = movie_from_file
+                        yield post
+                        count += 1
+                except Exception:
+                    pass
+                if count > 0:
+                    return
+        return  # ijson 解析成功（0条也算）
+    except ImportError:
+        pass  # ijson 未安装，走下面的普通路径
+
+    # ── 普通 json.load（一次性读取，处理完立即释放）────────────────
+    import gc
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    chunk = (data if isinstance(data, list)
+             else data.get("data", data.get("posts", data.get("items", []))))
+    del data
+    gc.collect()
+    for post in chunk:
+        if not post.get("movie"):
+            post["movie"] = movie_from_file
+        yield post
+    del chunk
+    gc.collect()
+
+
+def load_sip_posts(root: Path):
+    """
+    只将含 SIP 编码的帖子保留在内存中，其余立即丢弃。
+    返回：
+        code_posts  {code: [post, ...]}   每个 SIP 编码的帖子列表
+        all_sip     [post, ...]           所有 SIP 帖子（去重）
+    """
+    import gc
+    code_posts: dict[int, list] = defaultdict(list)
+    all_sip   : list[dict]      = []
+    seen_ids  : set             = set()
+    total_read = 0
+
     for path in sorted(root.rglob("*_coded.json")):
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        chunk = data if isinstance(data, list) else data.get(
-            "data", data.get("posts", data.get("items", [])))
-        movie_from_file = path.stem.removesuffix("_coded").removesuffix("_电影")
-        for p in chunk:
-            if not p.get("movie"):
-                p["movie"] = movie_from_file
-            posts.append(p)
-    return posts
+        print(f"  读取 {path.name} ...", end=" ", flush=True)
+        file_sip = 0
+        for p in _iter_posts_from_file(path):
+            total_read += 1
+            if FILTER_PATTERN in (p.get("text") or ""):
+                continue
+            codes = {int(c) for c in (p.get("codes") or []) if str(c).isdigit()}
+            sip_hits = codes & SIP_CODE_SET
+            if not sip_hits:
+                continue                       # 不是 SIP 帖，直接丢弃
+
+            p["_codes_set"] = codes
+            for c in sip_hits:
+                code_posts[c].append(p)
+
+            pid = p.get("id") or id(p)
+            if pid not in seen_ids:
+                seen_ids.add(pid)
+                all_sip.append(p)
+                file_sip += 1
+
+        print(f"SIP帖 +{file_sip}")
+        gc.collect()
+
+    print(f"共读取 {total_read:,} 条，SIP帖子（去重）{len(all_sip):,} 条")
+
+    # 按电影+互动量排序
+    for c in code_posts:
+        code_posts[c].sort(key=movie_sort_key)
+    all_sip.sort(key=movie_sort_key)
+
+    return code_posts, all_sip
 
 
 def movie_sort_key(p: dict) -> tuple:
@@ -164,37 +251,14 @@ def main():
         print(f"❌ 目录不存在：{root}")
         return
 
-    print("加载帖子数据...")
-    all_posts = load_posts(root)
-    print(f"共 {len(all_posts):,} 条帖子")
+    try:
+        import ijson  # noqa
+        print("✔ 检测到 ijson，将使用流式解析（低内存占用）")
+    except ImportError:
+        print("⚠  未检测到 ijson，使用普通解析（若再次 MemoryError，请运行: pip install ijson）")
 
-    # 过滤模板帖，预处理 codes
-    posts = []
-    for p in all_posts:
-        if FILTER_PATTERN in (p.get("text") or ""):
-            continue
-        p["_codes_set"] = {int(c) for c in (p.get("codes") or []) if str(c).isdigit()}
-        posts.append(p)
-
-    # 按编码建索引
-    code_posts: dict[int, list] = defaultdict(list)
-    for p in posts:
-        for c in p["_codes_set"]:
-            if c in SIP_CODE_SET:
-                code_posts[c].append(p)
-
-    # 排序每个编码的帖子
-    for c in code_posts:
-        code_posts[c].sort(key=movie_sort_key)
-
-    # 所有 SIP 帖子（去重，按电影+互动排序）
-    seen_ids = set()
-    all_sip = []
-    for p in sorted(posts, key=movie_sort_key):
-        pid = p.get("id") or id(p)
-        if p["_codes_set"] & SIP_CODE_SET and pid not in seen_ids:
-            seen_ids.add(pid)
-            all_sip.append(p)
+    print("扫描 SIP 编码帖子（非SIP帖子不载入内存）...")
+    code_posts, all_sip = load_sip_posts(root)
 
     wb = Workbook()
     first = True
