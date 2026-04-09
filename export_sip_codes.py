@@ -21,6 +21,7 @@ from pathlib import Path
 from collections import defaultdict
 
 from openpyxl import Workbook
+from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 
@@ -200,17 +201,31 @@ HEADERS = ["序号", "电影", "用户昵称", "互动总量", "转发", "评论
 COL_WIDTHS = [5, 12, 16, 10, 7, 7, 7, 17, 18, 70]
 
 
-def write_sheet(ws, rows: list[dict], category: str, fill=None):
-    ws.append(HEADERS)
-    for cell in ws[1]:
-        cell.fill = HDR_FILL
-        cell.font = HDR_FONT
-        cell.alignment = CENTER
-        cell.border = BDR
-    ws.row_dimensions[1].height = 18
+def _setup_ws(ws):
+    """列宽 + 冻结首行（write-only 模式需在首次 append 前设置）。"""
+    for i, w in enumerate(COL_WIDTHS, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A2"
 
-    # 数据行不逐格设样式——openpyxl 逐格设样式极慢（百万次操作）
+
+def _header_row(ws):
+    """返回带样式的表头单元格列表（WriteOnlyCell）。"""
+    cells = []
+    for h in HEADERS:
+        c = WriteOnlyCell(ws, value=h)
+        c.fill = HDR_FILL
+        c.font = HDR_FONT
+        c.alignment = CENTER
+        c.border = BDR
+        cells.append(c)
+    return cells
+
+
+def write_sheet(ws, rows: list[dict], category: str = ""):
+    """Write-only 兼容：每行 append 后立即写入磁盘，内存占用恒定。"""
+    _setup_ws(ws)
+    ws.append(_header_row(ws))
+
     for idx, p in enumerate(rows, 1):
         movie = normalize_movie(p.get("movie", ""))
         codes = p.get("_codes_set") or {int(c) for c in (p.get("codes") or []) if str(c).isdigit()}
@@ -226,9 +241,6 @@ def write_sheet(ws, rows: list[dict], category: str, fill=None):
             ", ".join(str(c) for c in sorted(codes)),
             text,
         ])
-
-    for i, w in enumerate(COL_WIDTHS, 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
 
 
 def main():
@@ -251,40 +263,25 @@ def main():
     print("扫描 SIP 编码帖子（非SIP帖子不载入内存）...")
     code_posts, all_sip = load_sip_posts(root)
 
-    wb = Workbook()
-    first = True
+    # write_only=True：每行 append 立即写入临时文件，不在内存中堆积单元格对象
+    wb = Workbook(write_only=True)
+
+    def safe_sheet_name(code, name):
+        s = name.replace("/", "-").replace("\\", "-").replace("*", "").replace(
+            "?", "").replace("[", "").replace("]", "").replace(":", "")
+        return f"c{code:02d}_{s}"[:31]
 
     # ── 每个编码一个 sheet ───────────────────────────────────────
     for code, category, name in SIP_CODES:
         rows = code_posts.get(code, [])
-        # sheet 名：Excel 上限31字符
-        safe_name  = name.replace("/", "-").replace("\\", "-").replace("*", "").replace("?", "").replace("[", "").replace("]", "").replace(":", "")
-        sheet_name = f"c{code:02d}_{safe_name}"[:31]
-        if first:
-            ws = wb.active
-            ws.title = sheet_name
-            first = False
-        else:
-            ws = wb.create_sheet(sheet_name)
-
-        ws.append([f"编码 {code}  {category}：{name}  （共 {len(rows)} 条）"])
-        ws[1][0].font = Font(bold=True, size=11)
-        ws[1][0].fill = CAT_FILLS.get(category, PatternFill())
-        ws.row_dimensions[1].height = 20
-
-        ws.append([])  # 空行
+        ws = wb.create_sheet(safe_sheet_name(code, name))
         write_sheet(ws, rows, category)
-        print(f"  c{code:02d} {name:<16} {len(rows):>5} 条")
+        print(f"  c{code:02d} {name:<18} {len(rows):>6} 条")
 
     # ── 最后：所有 SIP 行为帖子汇总 ─────────────────────────────
     ws_all = wb.create_sheet("★全部SIP行为帖子")
-    ws_all.append([f"全部 SIP 行为帖子汇总（编码含任意SIP编码，共 {len(all_sip)} 条，已去重）"])
-    ws_all[1][0].font = Font(bold=True, size=11)
-    ws_all[1][0].fill = PatternFill("solid", fgColor="D9D9D9")
-    ws_all.row_dimensions[1].height = 20
-    ws_all.append([])
     print(f"  ★ 写入全部SIP汇总 {len(all_sip):,} 条...", end=" ", flush=True)
-    write_sheet(ws_all, all_sip, "")
+    write_sheet(ws_all, all_sip)
     print("完成")
 
     print("保存 Excel 文件...", end=" ", flush=True)
