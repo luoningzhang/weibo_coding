@@ -210,14 +210,12 @@ def write_sheet(ws, rows: list[dict], category: str, fill=None):
     ws.row_dimensions[1].height = 18
     ws.freeze_panes = "A2"
 
-    row_fill = fill or CAT_FILLS.get(category, PatternFill())
-
+    # 数据行不逐格设样式——openpyxl 逐格设样式极慢（百万次操作）
     for idx, p in enumerate(rows, 1):
-        movie  = normalize_movie(p.get("movie", ""))
-        codes  = sorted({int(c) for c in (p.get("codes") or []) if str(c).isdigit()})
-        text   = (p.get("text") or "").replace("\n", " ").replace("\r", "")
-        eng    = engagement(p)
-
+        movie = normalize_movie(p.get("movie", ""))
+        codes = p.get("_codes_set") or {int(c) for c in (p.get("codes") or []) if str(c).isdigit()}
+        text  = (p.get("text") or "").replace("\n", " ").replace("\r", "")
+        eng   = engagement(p)
         ws.append([
             idx, movie, get_screen_name(p),
             eng,
@@ -225,16 +223,9 @@ def write_sheet(ws, rows: list[dict], category: str, fill=None):
             int(p.get("comments_count") or 0),
             int(p.get("attitudes_count") or 0),
             fmt_dt(p.get("created_at", "")),
-            ", ".join(str(c) for c in codes),
+            ", ".join(str(c) for c in sorted(codes)),
             text,
         ])
-        r = ws.max_row
-        for ci, cell in enumerate(ws[r], 1):
-            cell.font      = BODY
-            cell.fill      = row_fill
-            cell.border    = BDR
-            cell.alignment = WRAP if ci == len(HEADERS) else CENTER
-        ws.row_dimensions[r].height = 14
 
     for i, w in enumerate(COL_WIDTHS, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
@@ -292,10 +283,13 @@ def main():
     ws_all[1][0].fill = PatternFill("solid", fgColor="D9D9D9")
     ws_all.row_dimensions[1].height = 20
     ws_all.append([])
+    print(f"  ★ 写入全部SIP汇总 {len(all_sip):,} 条...", end=" ", flush=True)
     write_sheet(ws_all, all_sip, "")
-    print(f"\n  ★ 全部SIP帖子（去重）      {len(all_sip):>5} 条")
+    print("完成")
 
+    print("保存 Excel 文件...", end=" ", flush=True)
     wb.save(args.out)
+    print("完成")
     print(f"\n✅ 已导出 → {args.out}  （{len(SIP_CODES)} 个编码sheet + 1 个汇总sheet）")
 
 
