@@ -267,7 +267,8 @@ def main():
     for code, category, name in SIP_CODES:
         rows = code_posts.get(code, [])
         # sheet 名：Excel 上限31字符
-        sheet_name = f"c{code:02d}_{name}"[:31]
+        safe_name  = name.replace("/", "-").replace("\\", "-").replace("*", "").replace("?", "").replace("[", "").replace("]", "").replace(":", "")
+        sheet_name = f"c{code:02d}_{safe_name}"[:31]
         if first:
             ws = wb.active
             ws.title = sheet_name
