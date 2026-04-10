@@ -442,74 +442,62 @@ def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = N
         ws2.column_dimensions[get_column_letter(col_i)].width = 16
 
     # ══════════════════════════════════════════════════════════════
-    #  Table 3：SIPs行为指纹对比
-    #  列：指标 | SIP帖子% | 全样本% | 比值 | Code17子集%
-    #  SIP = 含任意SIP编码；Code17 = SIP内最显性子集
+    #  Table 3：SIP帖子 vs 全样本 行为差异
+    #  SIP = 含任意SIP相关编码的帖子
     # ══════════════════════════════════════════════════════════════
     ws3 = wb.create_sheet("Table3_SIPs指纹")
 
-    SP  = stats["sip_posts"]
-    C17 = stats["c17_posts"]
+    SP = stats["sip_posts"]
 
     ws3.append(["行为指标",
-                f"SIP帖子\n(n={SP:,})\n共现率%",
-                f"全样本\n(n={T:,})\n共现率%",
-                "比值\n(SIP÷全样本)",
-                f"Code17子集\n(n={C17:,})\n共现率%"])
+                f"SIP帖子（n={SP:,}）\n共现率%",
+                f"全样本（n={T:,}）\n共现率%",
+                "比值（SIP÷全样本）"])
     style_header(ws3, 1)
-    ws3.row_dimensions[1].height = 42
+    ws3.row_dimensions[1].height = 36
 
-    # ── 样本概况行 ──────────────────────────────────────────────
     ws3.append(["帖子总数",
-                f"{SP:,}（{pct(SP,T)}%）",
+                f"{SP:,}（{pct(SP,T):.2f}%）",
                 f"{T:,}（100%）",
-                round(SP/T, 4) if T else 0,
-                f"{C17:,}（占SIP {pct(C17,SP)}%）"])
+                round(SP/T, 4) if T else 0])
     style_body(ws3, ws3.max_row, bold=True)
 
     # ── 二阶类别共现率 ──────────────────────────────────────────
-    ws3.append(["── 二阶类别共现率（一帖含该类至少一编码即计入）", "", "", "", ""])
+    ws3.append(["── 二阶类别共现率（含该类至少一编码即计入） ──", "", "", ""])
     ws3[ws3.max_row][0].font = Font(bold=True, italic=True, size=10)
 
     for i, (zh, en, _) in enumerate(CATEGORIES):
-        sn   = stats["sip_cat_posts"][i]
-        an   = stats["cat_posts"][i]
-        c17n = stats["c17_cat_posts"][i]
-        s_r  = pct(sn, SP)
-        a_r  = pct(an, T)
-        c_r  = pct(c17n, C17)
+        sn    = stats["sip_cat_posts"][i]
+        an    = stats["cat_posts"][i]
+        s_r   = pct(sn, SP)
+        a_r   = pct(an, T)
         ratio = round(s_r / a_r, 3) if a_r else 0.0
-        ws3.append([f"{i+1}. {zh}", f"{s_r}%", f"{a_r}%", ratio, f"{c_r}%"])
+        ws3.append([f"{i+1}. {zh}", f"{s_r}%", f"{a_r}%", ratio])
         style_body(ws3, ws3.max_row)
 
     # ── 关键一阶编码共现率 ──────────────────────────────────────
-    ws3.append(["── 关键一阶编码共现率", "", "", "", ""])
+    ws3.append(["── 关键一阶编码共现率 ──", "", "", ""])
     ws3[ws3.max_row][0].font = Font(bold=True, italic=True, size=10)
 
     for code in HIGHLIGHT_CODES:
-        sn   = stats["sip_code_posts"].get(code, 0)
-        an   = stats["all_code_posts"].get(code, 0)
-        c17n = stats["c17_code_posts"].get(code, 0)
-        s_r  = pct(sn, SP)
-        a_r  = pct(an, T)
-        c_r  = pct(c17n, C17)
+        sn    = stats["sip_code_posts"].get(code, 0)
+        an    = stats["all_code_posts"].get(code, 0)
+        s_r   = pct(sn, SP)
+        a_r   = pct(an, T)
         ratio = round(s_r / a_r, 3) if a_r else 0.0
-        star = " ★" if code == SIP_CODE_EXPLICIT else ""
-        ws3.append([f"编码 {code}{star}", f"{s_r}%", f"{a_r}%", ratio, f"{c_r}%"])
+        ws3.append([f"编码 {code}", f"{s_r}%", f"{a_r}%", ratio])
         style_body(ws3, ws3.max_row)
 
-    ws3.column_dimensions["A"].width = 32
-    for col_i in range(2, 6):
-        ws3.column_dimensions[get_column_letter(col_i)].width = 20
+    ws3.column_dimensions["A"].width = 34
+    for col_i in range(2, 5):
+        ws3.column_dimensions[get_column_letter(col_i)].width = 22
 
     # ══════════════════════════════════════════════════════════════
-    #  Table 4：SIPs跨电影分布
-    #  SIP = 含任意SIP编码；Code17 = 最显性子集
+    #  Table 4：SIP帖子在五部电影中的分布
+    #  SIP = 含任意SIP相关编码的帖子
     # ══════════════════════════════════════════════════════════════
     ws4 = wb.create_sheet("Table4_SIPs电影分布")
-    ws4.append(["电影", "首映日", "电影总帖数",
-                "SIP帖数", "SIP占比%",
-                "其中Code17", "Code17占SIP%"])
+    ws4.append(["电影", "首映日", "电影总帖数", "SIP帖数", "SIP占比%"])
     style_header(ws4, 1)
 
     for movie in movies:
@@ -517,17 +505,11 @@ def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = N
         rel_s = rel.strftime("%Y-%m-%d") if isinstance(rel, datetime) else str(rel)
         mp    = stats["movie_posts"].get(movie, 0)
         sn    = stats["sip_by_movie"].get(movie, 0)
-        c17n  = stats["c17_by_movie"].get(movie, 0)
-        ws4.append([movie, rel_s, mp,
-                    sn, pct(sn, mp),
-                    c17n, pct(c17n, sn)])
+        ws4.append([movie, rel_s, mp, sn, pct(sn, mp)])
         style_body(ws4, ws4.max_row)
 
     total_sip = sum(stats["sip_by_movie"].get(m, 0) for m in movies)
-    total_c17 = sum(stats["c17_by_movie"].get(m, 0) for m in movies)
-    ws4.append(["合计", "—", T,
-                total_sip, pct(total_sip, T),
-                total_c17, pct(total_c17, total_sip)])
+    ws4.append(["合计", "—", T, total_sip, pct(total_sip, T)])
     style_body(ws4, ws4.max_row, bold=True)
 
     auto_width(ws4)
