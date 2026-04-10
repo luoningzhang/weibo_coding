@@ -475,17 +475,18 @@ def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = N
         ws3.append([f"{i+1}. {zh}", f"{s_r}%", f"{a_r}%", ratio])
         style_body(ws3, ws3.max_row)
 
-    # ── 关键一阶编码共现率 ──────────────────────────────────────
-    ws3.append(["── 关键一阶编码共现率 ──", "", "", ""])
+    # ── 全部SIP一阶编码共现率 ────────────────────────────────────
+    ws3.append(["── 全部SIP行为一阶编码共现率 ──", "", "", ""])
     ws3[ws3.max_row][0].font = Font(bold=True, italic=True, size=10)
 
-    for code in HIGHLIGHT_CODES:
+    for code in sorted(SIP_CODES_ALL):
         sn    = stats["sip_code_posts"].get(code, 0)
         an    = stats["all_code_posts"].get(code, 0)
         s_r   = pct(sn, SP)
         a_r   = pct(an, T)
         ratio = round(s_r / a_r, 3) if a_r else 0.0
-        ws3.append([f"编码 {code}", f"{s_r}%", f"{a_r}%", ratio])
+        name  = cb.get(code, "")
+        ws3.append([f"编码{code} {name}", f"{s_r}%", f"{a_r}%", ratio])
         style_body(ws3, ws3.max_row)
 
     ws3.column_dimensions["A"].width = 34
