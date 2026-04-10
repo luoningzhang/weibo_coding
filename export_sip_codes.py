@@ -245,9 +245,16 @@ def write_sheet(ws, rows: list[dict], category: str = ""):
 
 def main():
     parser = argparse.ArgumentParser(description="导出SIP编码帖子明细")
-    parser.add_argument("--dir", default="data/tmp")
-    parser.add_argument("--out", default="sip_posts.xlsx")
+    parser.add_argument("--dir",     default="data/tmp")
+    parser.add_argument("--out",     default="",
+                        help="输出文件名（默认自动按阈值命名）")
+    parser.add_argument("--min-eng", type=int, default=0,
+                        help="互动量最低阈值（转+评+赞，默认0=不过滤）")
     args = parser.parse_args()
+
+    out_path = args.out or (
+        f"sip_posts_top{args.min_eng}.xlsx" if args.min_eng > 0 else "sip_posts.xlsx"
+    )
 
     root = Path(args.dir)
     if not root.exists():
@@ -262,6 +269,14 @@ def main():
 
     print("扫描 SIP 编码帖子（非SIP帖子不载入内存）...")
     code_posts, all_sip = load_sip_posts(root)
+
+    # ── 互动量过滤 ────────────────────────────────────────────────
+    if args.min_eng > 0:
+        print(f"过滤互动量 ≥ {args.min_eng} ...")
+        code_posts = {c: [p for p in rows if engagement(p) >= args.min_eng]
+                      for c, rows in code_posts.items()}
+        all_sip = [p for p in all_sip if engagement(p) >= args.min_eng]
+        print(f"过滤后：SIP帖子（去重）{len(all_sip):,} 条")
 
     # write_only=True：每行 append 立即写入临时文件，不在内存中堆积单元格对象
     wb = Workbook(write_only=True)
@@ -285,9 +300,9 @@ def main():
     print("完成")
 
     print("保存 Excel 文件...", end=" ", flush=True)
-    wb.save(args.out)
+    wb.save(out_path)
     print("完成")
-    print(f"\n✅ 已导出 → {args.out}  （{len(SIP_CODES)} 个编码sheet + 1 个汇总sheet）")
+    print(f"\n✅ 已导出 → {out_path}  （{len(SIP_CODES)} 个编码sheet + 1 个汇总sheet）")
 
 
 if __name__ == "__main__":
