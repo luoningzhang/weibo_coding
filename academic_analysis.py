@@ -33,10 +33,16 @@ CAT_NAMES_ZH = [c[0] for c in CATEGORIES]
 CAT_CODES    = [c[2] for c in CATEGORIES]
 N_CATS       = len(CATEGORIES)
 
-# SIPs 核心编码
-SIPS_CODE = 17
-# Table 3 额外高亮的一阶编码
-HIGHLIGHT_CODES = [21, 22, 2, 3]
+# ── SIP 行为编码集合（宽定义，依据论文 Section 1）────────────────
+# 数据与市场劳动：2,3,4,26
+# 策略性介入：21,22,23,24,25,27
+# 身份认同表达（选定）：10,17,19
+# 话语防御：14,15,16,20
+SIP_CODES_ALL = {2, 3, 4, 10, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24, 25, 26, 27}
+# Code 17 = 最显性形式（公开自我命名），作为 SIP 内部子集单独展示
+SIP_CODE_EXPLICIT = 17
+# Table 3 关键一阶编码高亮（SIP 中有理论意义的代表性编码）
+HIGHLIGHT_CODES = [17, 21, 22, 2, 3, 10, 14]
 
 # ── 上映日期 ──────────────────────────────────────────────────────
 RELEASE_DATES_RAW = {
@@ -177,14 +183,19 @@ def build_stats(posts: list[dict]):
     # per-movie per-code post counts (for Table 1 code-level detail)
     mv_code_posts = defaultdict(lambda: defaultdict(int))
 
-    # SIPs accumulators
-    sips_posts   = 0
-    sips_cat_posts = [0] * N_CATS          # how many SIPs posts touch each cat
-    sips_code_posts = defaultdict(int)     # raw code co-occurrence in SIPs
-    all_code_posts  = defaultdict(int)     # raw code occurrence in full sample
+    all_code_posts = defaultdict(int)   # full sample per-code counts
 
-    # SIPs per movie
-    sips_by_movie = defaultdict(int)
+    # SIP 宽定义（含任意 SIP 编码）
+    sip_posts      = 0
+    sip_cat_posts  = [0] * N_CATS
+    sip_code_posts = defaultdict(int)
+    sip_by_movie   = defaultdict(int)
+
+    # Code-17 子集（最显性自我命名，SIP 内部子集）
+    c17_posts      = 0
+    c17_cat_posts  = [0] * N_CATS
+    c17_code_posts = defaultdict(int)
+    c17_by_movie   = defaultdict(int)
 
     total_posts = 0
     total_eng   = 0
@@ -228,15 +239,25 @@ def build_stats(posts: list[dict]):
             all_code_posts[c] += 1
             mv_code_posts[movie][c] += 1
 
-        is_sip = SIPS_CODE in codes_set
-        if is_sip:
-            sips_posts += 1
-            sips_by_movie[movie] += 1
+        # SIP 宽定义：含任意 SIP 编码
+        if codes_set & SIP_CODES_ALL:
+            sip_posts += 1
+            sip_by_movie[movie] += 1
             for i, flag in enumerate(flags):
                 if flag:
-                    sips_cat_posts[i] += 1
-            for c in codes:
-                sips_code_posts[c] += 1
+                    sip_cat_posts[i] += 1
+            for c in codes_set:
+                sip_code_posts[c] += 1
+
+        # Code-17 子集
+        if SIP_CODE_EXPLICIT in codes_set:
+            c17_posts += 1
+            c17_by_movie[movie] += 1
+            for i, flag in enumerate(flags):
+                if flag:
+                    c17_cat_posts[i] += 1
+            for c in codes_set:
+                c17_code_posts[c] += 1
 
     return {
         "total_posts":       total_posts,
@@ -248,11 +269,15 @@ def build_stats(posts: list[dict]):
         "mv_cat_posts":      {k: list(v) for k, v in mv_cat_posts.items()},
         "phase_cat_posts":   phase_cat_posts,
         "phase_cat_eng":     phase_cat_eng,
-        "sips_posts":        sips_posts,
-        "sips_cat_posts":    sips_cat_posts,
-        "sips_code_posts":   dict(sips_code_posts),
         "all_code_posts":    dict(all_code_posts),
-        "sips_by_movie":     dict(sips_by_movie),
+        "sip_posts":         sip_posts,
+        "sip_cat_posts":     sip_cat_posts,
+        "sip_code_posts":    dict(sip_code_posts),
+        "sip_by_movie":      dict(sip_by_movie),
+        "c17_posts":         c17_posts,
+        "c17_cat_posts":     c17_cat_posts,
+        "c17_code_posts":    dict(c17_code_posts),
+        "c17_by_movie":      dict(c17_by_movie),
         "mv_code_posts":       {k: dict(v) for k, v in mv_code_posts.items()},
         "mv_phase_cat_posts":  mv_phase_cat_posts,
         "mv_phase_cat_eng":    mv_phase_cat_eng,
@@ -418,62 +443,91 @@ def export_excel(stats: dict, out_path: str, codebook: dict[int, str] | None = N
 
     # ══════════════════════════════════════════════════════════════
     #  Table 3：SIPs行为指纹对比
+    #  列：指标 | SIP帖子% | 全样本% | 比值 | Code17子集%
+    #  SIP = 含任意SIP编码；Code17 = SIP内最显性子集
     # ══════════════════════════════════════════════════════════════
     ws3 = wb.create_sheet("Table3_SIPs指纹")
 
-    SP = stats["sips_posts"]
+    SP  = stats["sip_posts"]
+    C17 = stats["c17_posts"]
 
-    ws3.append(["指标", "SIPs子集（含code17）", "全样本", "SIPs/全样本比值"])
+    ws3.append(["行为指标",
+                f"SIP帖子\n(n={SP:,})\n共现率%",
+                f"全样本\n(n={T:,})\n共现率%",
+                "比值\n(SIP÷全样本)",
+                f"Code17子集\n(n={C17:,})\n共现率%"])
     style_header(ws3, 1)
+    ws3.row_dimensions[1].height = 42
 
-    ws3.append(["帖子数", SP, T, round(SP / T, 4) if T else 0])
+    # ── 样本概况行 ──────────────────────────────────────────────
+    ws3.append(["帖子总数",
+                f"{SP:,}（{pct(SP,T)}%）",
+                f"{T:,}（100%）",
+                round(SP/T, 4) if T else 0,
+                f"{C17:,}（占SIP {pct(C17,SP)}%）"])
     style_body(ws3, ws3.max_row, bold=True)
 
-    ws3.append(["── 二阶类别共现率（%） ──", "", "", ""])
+    # ── 二阶类别共现率 ──────────────────────────────────────────
+    ws3.append(["── 二阶类别共现率（一帖含该类至少一编码即计入）", "", "", "", ""])
     ws3[ws3.max_row][0].font = Font(bold=True, italic=True, size=10)
 
-    for i, (zh, en, codes) in enumerate(CATEGORIES):
-        sn  = stats["sips_cat_posts"][i]
-        an  = stats["cat_posts"][i]
-        s_r = pct(sn, SP)
-        a_r = pct(an, T)
+    for i, (zh, en, _) in enumerate(CATEGORIES):
+        sn   = stats["sip_cat_posts"][i]
+        an   = stats["cat_posts"][i]
+        c17n = stats["c17_cat_posts"][i]
+        s_r  = pct(sn, SP)
+        a_r  = pct(an, T)
+        c_r  = pct(c17n, C17)
         ratio = round(s_r / a_r, 3) if a_r else 0.0
-        ws3.append([f"{i+1}. {zh}", f"{s_r}%", f"{a_r}%", ratio])
+        ws3.append([f"{i+1}. {zh}", f"{s_r}%", f"{a_r}%", ratio, f"{c_r}%"])
         style_body(ws3, ws3.max_row)
 
-    ws3.append(["── 关键一阶编码共现率（%） ──", "", "", ""])
+    # ── 关键一阶编码共现率 ──────────────────────────────────────
+    ws3.append(["── 关键一阶编码共现率", "", "", "", ""])
     ws3[ws3.max_row][0].font = Font(bold=True, italic=True, size=10)
 
     for code in HIGHLIGHT_CODES:
-        sn  = stats["sips_code_posts"].get(code, 0)
-        an  = stats["all_code_posts"].get(code, 0)
-        s_r = pct(sn, SP)
-        a_r = pct(an, T)
+        sn   = stats["sip_code_posts"].get(code, 0)
+        an   = stats["all_code_posts"].get(code, 0)
+        c17n = stats["c17_code_posts"].get(code, 0)
+        s_r  = pct(sn, SP)
+        a_r  = pct(an, T)
+        c_r  = pct(c17n, C17)
         ratio = round(s_r / a_r, 3) if a_r else 0.0
-        ws3.append([f"编码 {code}", f"{s_r}%", f"{a_r}%", ratio])
+        star = " ★" if code == SIP_CODE_EXPLICIT else ""
+        ws3.append([f"编码 {code}{star}", f"{s_r}%", f"{a_r}%", ratio, f"{c_r}%"])
         style_body(ws3, ws3.max_row)
 
-    ws3.column_dimensions["A"].width = 28
-    for col_i in range(2, 5):
-        ws3.column_dimensions[get_column_letter(col_i)].width = 22
+    ws3.column_dimensions["A"].width = 32
+    for col_i in range(2, 6):
+        ws3.column_dimensions[get_column_letter(col_i)].width = 20
 
     # ══════════════════════════════════════════════════════════════
     #  Table 4：SIPs跨电影分布
+    #  SIP = 含任意SIP编码；Code17 = 最显性子集
     # ══════════════════════════════════════════════════════════════
     ws4 = wb.create_sheet("Table4_SIPs电影分布")
-    ws4.append(["电影", "首映日", "该电影总帖数", "含code17帖数", "SIPs内部占比%"])
+    ws4.append(["电影", "首映日", "电影总帖数",
+                "SIP帖数", "SIP占比%",
+                "其中Code17", "Code17占SIP%"])
     style_header(ws4, 1)
 
     for movie in movies:
-        rel  = RELEASE_DATES_RAW.get(movie, "—")
+        rel   = RELEASE_DATES_RAW.get(movie, "—")
         rel_s = rel.strftime("%Y-%m-%d") if isinstance(rel, datetime) else str(rel)
-        mp   = stats["movie_posts"].get(movie, 0)
-        sn   = stats["sips_by_movie"].get(movie, 0)
-        ws4.append([movie, rel_s, mp, sn, pct(sn, mp)])
+        mp    = stats["movie_posts"].get(movie, 0)
+        sn    = stats["sip_by_movie"].get(movie, 0)
+        c17n  = stats["c17_by_movie"].get(movie, 0)
+        ws4.append([movie, rel_s, mp,
+                    sn, pct(sn, mp),
+                    c17n, pct(c17n, sn)])
         style_body(ws4, ws4.max_row)
 
-    total_sips = sum(stats["sips_by_movie"].get(m, 0) for m in movies)
-    ws4.append(["合计", "—", T, total_sips, pct(total_sips, T)])
+    total_sip = sum(stats["sip_by_movie"].get(m, 0) for m in movies)
+    total_c17 = sum(stats["c17_by_movie"].get(m, 0) for m in movies)
+    ws4.append(["合计", "—", T,
+                total_sip, pct(total_sip, T),
+                total_c17, pct(total_c17, total_sip)])
     style_body(ws4, ws4.max_row, bold=True)
 
     auto_width(ws4)
@@ -654,11 +708,13 @@ def plot_figure1(stats: dict, fig_path: str):
 # ─────────────────────────────────────────────────────────────────
 
 def print_summary(stats: dict):
-    T  = stats["total_posts"]
-    TE = stats["total_eng"]
-    SP = stats["sips_posts"]
+    T   = stats["total_posts"]
+    TE  = stats["total_eng"]
+    SP  = stats["sip_posts"]
+    C17 = stats["c17_posts"]
     print(f"\n{'='*64}")
-    print(f"  全样本：{T:,} 帖  |  互动总量：{TE:,}  |  SIPs（含code17）：{SP:,}")
+    print(f"  全样本：{T:,} 帖  |  互动总量：{TE:,}")
+    print(f"  SIP帖子（含任意SIP编码）：{SP:,}（{pct(SP,T):.1f}%）  |  其中Code17子集：{C17:,}（占SIP {pct(C17,SP):.1f}%）")
     print(f"{'='*64}")
 
     print("\n【Table 1 预览】六大类行为分布（全样本占比%）")
@@ -682,12 +738,13 @@ def print_summary(stats: dict):
         print(f"  {zh:<14} {pp:>7.2f}% {ep:>7.2f}% {avg:>10,.0f} {eff:>8.3f}")
 
     print(f"\n【Table 4 预览】SIPs跨电影分布")
-    print(f"  {'电影':<12} {'电影总帖':>10} {'SIPs帖':>8} {'占比%':>8}")
-    print("  " + "─"*42)
+    print(f"  {'电影':<12} {'总帖':>8} {'SIP帖':>8} {'SIP%':>7} {'Code17':>8} {'C17占SIP%':>10}")
+    print("  " + "─"*57)
     for movie in MOVIE_ORDER_SORTED:
-        mp = stats["movie_posts"].get(movie, 0)
-        sn = stats["sips_by_movie"].get(movie, 0)
-        print(f"  {movie:<12} {mp:>10,} {sn:>8,} {pct(sn,mp):>7.2f}%")
+        mp   = stats["movie_posts"].get(movie, 0)
+        sn   = stats["sip_by_movie"].get(movie, 0)
+        c17n = stats["c17_by_movie"].get(movie, 0)
+        print(f"  {movie:<12} {mp:>8,} {sn:>8,} {pct(sn,mp):>6.1f}% {c17n:>8,} {pct(c17n,sn):>9.1f}%")
 
 
 # ─────────────────────────────────────────────────────────────────
