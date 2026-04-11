@@ -196,8 +196,57 @@ def export_excel(root: Path, movies: list[str], out_path: str):
         style_row(ws, ws.max_row)
         ws[ws.max_row][0].alignment = LEFT
 
+    # 空行
+    ws.append([""] * (len(movies) + 2))
+
+    # ── 不同用户数子表 ──────────────────────────────────────────────
+    ws.append(["不同用户数"] + [""] * (len(movies) + 1))
+    ws[ws.max_row][0].font = Font(bold=True, size=10)
+    ws[ws.max_row][0].fill = CAT_FILL
+
+    user_totals = [0] * n_stages   # 全部电影各阶段用户合计
+
+    for si, (stage_name, _) in enumerate(STAGES):
+        row = [stage_name]
+        row_total = 0
+        for m in movies:
+            users = all_data[m][si][2]
+            row.append(users if users is not None else "—")
+            if users is not None:
+                row_total += users
+        row.append(row_total)
+        user_totals[si] = row_total
+        ws.append(row)
+        style_row(ws, ws.max_row)
+        ws[ws.max_row][0].alignment = LEFT
+
+    # 空行
+    ws.append([""] * (len(movies) + 2))
+
+    # ── 用户保留率子表（相对各自①原始阶段）───────────────────────────
+    ws.append(["用户保留率（相对①原始）"] + [""] * (len(movies) + 1))
+    ws[ws.max_row][0].font = Font(bold=True, size=10)
+    ws[ws.max_row][0].fill = CAT_FILL
+
+    for si, (stage_name, _) in enumerate(STAGES):
+        row = [stage_name]
+        for m in movies:
+            users      = all_data[m][si][2]
+            base_users = base.get(m, (None, None))[1]
+            if users is not None and base_users:
+                row.append(f"{users/base_users*100:.1f}%")
+            else:
+                row.append("—")
+        # 全部电影合计用户保留率
+        tot_base_u = user_totals[0] if user_totals[0] else None
+        tot_u      = user_totals[si]
+        row.append(f"{tot_u/tot_base_u*100:.1f}%" if tot_base_u else "—")
+        ws.append(row)
+        style_row(ws, ws.max_row)
+        ws[ws.max_row][0].alignment = LEFT
+
     # 列宽
-    ws.column_dimensions["A"].width = 20
+    ws.column_dimensions["A"].width = 22
     for ci in range(2, len(movies) + 3):
         ws.column_dimensions[get_column_letter(ci)].width = 14
 
