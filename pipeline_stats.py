@@ -102,42 +102,104 @@ def print_report(root: Path, movies: list[str]):
 
 def export_excel(root: Path, movies: list[str], out_path: str):
     wb = Workbook()
+
+    from openpyxl.styles import Border, Side
+    from openpyxl.utils import get_column_letter
+
+    thin      = Side(style="thin")
+    BDR       = PatternFill()   # placeholder
+    HDR_FILL  = PatternFill("solid", fgColor="2F5597")
+    HDR_FONT  = Font(bold=True, color="FFFFFF", size=10)
+    CAT_FILL  = PatternFill("solid", fgColor="D6E4F0")
+    TOT_FILL  = PatternFill("solid", fgColor="FFF2CC")
+    BODY_FONT = Font(size=10)
+    CENTER    = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    LEFT      = Alignment(horizontal="left",   vertical="center")
+    BORDER    = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    def style_row(ws, row_i, fill=None, bold=False):
+        for cell in ws[row_i]:
+            cell.font   = Font(bold=bold, size=10)
+            cell.border = BORDER
+            cell.alignment = CENTER
+            if fill:
+                cell.fill = fill
+
+    # ── 收集所有数据 ──────────────────────────────────────────────
+    # data[movie] = [(stage_name, cnt, users), ...]
+    all_data = {m: collect(root, m) for m in movies}
+
+    # 阶段基数（各电影第一个非None阶段）
+    base = {}
+    for m in movies:
+        for _, cnt, users in all_data[m]:
+            if cnt is not None:
+                base[m] = (cnt, users)
+                break
+
+    # ══════════════════════════════════════════════════════════════
+    #  Sheet 1：宽表 — 每阶段帖子数 + 保留率
+    # ══════════════════════════════════════════════════════════════
     ws = wb.active
-    ws.title = "管道统计"
+    ws.title = "管道数据保留"
 
-    # 表头
-    header = ["电影", "阶段", "条数", "不同用户", "条数保留%", "用户保留%"]
-    ws.append(header)
-    hdr_fill = PatternFill("solid", fgColor="4472C4")
-    hdr_font = Font(bold=True, color="FFFFFF")
+    # 表头：阶段 | 电影1 | 电影2 | ... | 全部电影合计
+    hdr = ["筛选阶段"] + movies + ["全部电影\n合计"]
+    ws.append(hdr)
     for cell in ws[1]:
-        cell.fill = hdr_fill
-        cell.font = hdr_font
-        cell.alignment = Alignment(horizontal="center")
+        cell.fill      = HDR_FILL
+        cell.font      = HDR_FONT
+        cell.alignment = CENTER
+        cell.border    = BORDER
+    ws.row_dimensions[1].height = 32
 
-    fill_alt = PatternFill("solid", fgColor="EBF1FA")
-    for i, movie in enumerate(movies):
-        rows = collect(root, movie)
-        base_cnt = base_usr = None
-        for stage, cnt, users in rows:
-            if cnt is None:
-                ws.append([movie, stage, "—", "—", "—", "—"])
+    # 数据行：每阶段一行
+    n_stages = len(STAGES)
+    stage_totals = [0] * n_stages   # 全部电影各阶段合计
+
+    for si, (stage_name, _) in enumerate(STAGES):
+        row = [stage_name]
+        row_total = 0
+        for m in movies:
+            cnt = all_data[m][si][1]
+            row.append(cnt if cnt is not None else "—")
+            if cnt is not None:
+                row_total += cnt
+        row.append(row_total)
+        stage_totals[si] = row_total
+        ws.append(row)
+        style_row(ws, ws.max_row)
+        ws[ws.max_row][0].alignment = LEFT
+
+    # 空行
+    ws.append([""] * (len(movies) + 2))
+
+    # 保留率子表（相对各自①原始阶段）
+    ws.append(["保留率（相对①原始）"] + [""] * (len(movies) + 1))
+    ws[ws.max_row][0].font = Font(bold=True, size=10)
+    ws[ws.max_row][0].fill = CAT_FILL
+
+    for si, (stage_name, _) in enumerate(STAGES):
+        row = [stage_name]
+        for m in movies:
+            cnt      = all_data[m][si][1]
+            base_cnt = base.get(m, (None,))[0]
+            if cnt is not None and base_cnt:
+                row.append(f"{cnt/base_cnt*100:.1f}%")
             else:
-                if base_cnt is None:
-                    base_cnt, base_usr = cnt, users
-                pct_cnt = round(cnt   / base_cnt * 100, 1) if base_cnt else 0
-                pct_usr = round(users / base_usr * 100, 1) if base_usr else 0
-                ws.append([movie, stage, cnt, users, pct_cnt, pct_usr])
-            if i % 2 == 1:
-                for cell in ws[ws.max_row]:
-                    cell.fill = fill_alt
-        # 空行分隔
-        ws.append([""] * 6)
+                row.append("—")
+        # 全部电影合计保留率
+        tot_base = stage_totals[0] if stage_totals[0] else None
+        tot_cnt  = stage_totals[si]
+        row.append(f"{tot_cnt/tot_base*100:.1f}%" if tot_base else "—")
+        ws.append(row)
+        style_row(ws, ws.max_row)
+        ws[ws.max_row][0].alignment = LEFT
 
-    # 自动列宽
-    for col in ws.columns:
-        max_len = max((len(str(cell.value or "")) for cell in col), default=0)
-        ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 30)
+    # 列宽
+    ws.column_dimensions["A"].width = 20
+    for ci in range(2, len(movies) + 3):
+        ws.column_dimensions[get_column_letter(ci)].width = 14
 
     wb.save(out_path)
     print(f"✅ Excel 已导出 → {out_path}")
